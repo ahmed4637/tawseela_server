@@ -1,0 +1,76 @@
+const path = require('path');
+
+const express = require('express');
+const cors = require('cors');
+const morgan = require('morgan');
+
+const { sendSuccess, sendError } = require('./utils/apiResponse');
+
+const authRoutes = require('./routes/auth.routes');
+const addressRoutes = require('./routes/address.routes');
+const vehicleRoutes = require('./routes/vehicle.routes');
+const serviceRequestRoutes = require('./routes/serviceRequest.routes');
+const driverFinanceRoutes = require('./routes/driverFinance.routes');
+const adminRoutes = require('./routes/admin.routes');
+const uploadRoutes = require('./routes/upload.routes');
+const notificationRoutes = require('./routes/notification.routes');
+const ratingRoutes = require('./routes/rating.routes');
+const complaintRoutes = require('./routes/complaint.routes');
+const settingsRoutes = require('./routes/settings.routes');
+
+const errorHandler = require('./middlewares/errorHandler');
+
+const app = express();
+
+app.use(cors());
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+
+if (process.env.NODE_ENV === 'development') {
+  app.use(morgan('dev'));
+}
+
+app.get('/', (req, res) => {
+  return sendSuccess({
+    res,
+    message: 'Tawseela API is running',
+  });
+});
+
+app.get('/health', (req, res) => {
+  return sendSuccess({
+    res,
+    message: 'Server is healthy',
+    extra: {
+      timestamp: new Date().toISOString(),
+    },
+  });
+});
+
+app.use('/api/auth', authRoutes);
+app.use('/api/address', addressRoutes);
+app.use('/api/vehicles', vehicleRoutes);
+app.use('/api/dashboard/vehicles', vehicleRoutes);
+app.use('/api/requests', serviceRequestRoutes);
+app.use('/api/driver-finance', driverFinanceRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/uploads', uploadRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/ratings', ratingRoutes);
+app.use('/api/complaints', complaintRoutes);
+app.use('/api/settings', settingsRoutes);
+
+app.use((req, res) => {
+  return sendError({
+    res,
+    statusCode: 404,
+    message: 'المسار غير موجود',
+  });
+});
+
+app.use(errorHandler);
+
+module.exports = app;
