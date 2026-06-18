@@ -1,0 +1,36 @@
+{
+  "name": "tawseela-backend",
+  "version": "1.0.0",
+  "description": "Tawseela backend API using Node.js, Express, and MongoDB",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "seed:vehicles": "node src/seeders/vehicle.seeder.js",
+    "seed:admin": "node src/seeders/admin.seeder.js"
+  },
+  "keywords": [
+    "tawseela",
+    "nodejs",
+    "express",
+    "mongodb"
+  ],
+  "author": "Tawseela",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "express-validator": "^7.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.16.0",
+    "morgan": "^1.10.0",
+    "multer": "^2.1.1",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
