@@ -36,6 +36,12 @@ const accountSchema = new mongoose.Schema(
       select: false,
     },
 
+    profileImage: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+
     roles: {
       type: [String],
       enum: ['customer', 'driver', 'admin'],
@@ -66,6 +72,16 @@ const accountSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
+  }
+);
+
+accountSchema.index(
+  { email: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      email: { $type: 'string', $ne: '' },
+    },
   }
 );
 

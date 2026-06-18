@@ -8,6 +8,28 @@ const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 const { generateToken } = require('../utils/jwt');
 const { getDriverCommissionDebtLimit } = require('../services/appSettings.service');
+const normalizeEmail = (email) => {
+  return email ? email.trim().toLowerCase() : '';
+};
+
+const normalizePhone = (phone) => {
+  return phone ? phone.trim() : '';
+};
+
+const plateOptionalVehicleCodes = ['tuktuk', 'tricycle', 'motorcycle'];
+
+const isPlateNumberRequired = (vehicleTypeCode) => {
+  const code = vehicleTypeCode ? vehicleTypeCode.trim() : '';
+  return !plateOptionalVehicleCodes.includes(code);
+};
+
+const validatePlateNumberByVehicle = ({ vehicleTypeCode, plateNumber }) => {
+  if (isPlateNumberRequired(vehicleTypeCode) && !plateNumber?.trim()) {
+    const error = new Error('رقم المركبة مطلوب لهذا النوع من المركبات');
+    error.statusCode = 400;
+    throw error;
+  }
+};
 
 const buildAccountAuthResponse = async (account) => {
   const safeAccount = account.toSafeObject();
@@ -55,18 +77,41 @@ const buildAccountAuthResponse = async (account) => {
 };
 
 const signup = asyncHandler(async (req, res) => {
-  const { name, email, phone, password } = req.body;
+  const { name, password } = req.body;
 
-  const existingAccount = await Account.findOne({ phone });
+  const email = normalizeEmail(req.body.email);
+  const phone = normalizePhone(req.body.phone);
+
+  const duplicateFilters = [{ phone }];
+
+  if (email) {
+    duplicateFilters.push({ email });
+  }
+
+  const existingAccount = await Account.findOne({
+    $or: duplicateFilters,
+  });
 
   if (existingAccount) {
-    const error = new Error('رقم الهاتف مستخدم بالفعل');
+    if (existingAccount.phone === phone) {
+      const error = new Error('رقم الهاتف مستخدم بالفعل');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (email && existingAccount.email === email) {
+      const error = new Error('البريد الإلكتروني مستخدم بالفعل');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const error = new Error('بيانات الحساب مستخدمة بالفعل');
     error.statusCode = 400;
     throw error;
   }
 
   const account = await Account.create({
-    name,
+    name: name.trim(),
     email,
     phone,
     password,
@@ -83,7 +128,6 @@ const signup = asyncHandler(async (req, res) => {
     doc: authData,
   });
 });
-
 const login = asyncHandler(async (req, res) => {
   const { phone, password } = req.body;
 
@@ -136,7 +180,15 @@ const becomeDriver = asyncHandler(async (req, res) => {
     notes,
   } = req.body;
 
+  validatePlateNumberByVehicle({
+  vehicleTypeCode,
+  plateNumber,
+});
+
   const account = req.account;
+  if (profileImage && profileImage.trim()) {
+  account.profileImage = profileImage.trim();
+}
 
   let driverProfile = await DriverProfile.findOne({
     accountId: account._id,
@@ -216,6 +268,11 @@ const addDriverVehicle = asyncHandler(async (req, res) => {
     notes,
     isDefault,
   } = req.body;
+
+  validatePlateNumberByVehicle({
+  vehicleTypeCode,
+  plateNumber,
+});
 
   const vehicle = await DriverVehicle.create({
     accountId: req.account._id,
@@ -339,6 +396,10 @@ const updateDriverVehicle = asyncHandler(async (req, res) => {
     }
   }
 
+validatePlateNumberByVehicle({
+  vehicleTypeCode: vehicle.vehicleTypeCode,
+  plateNumber: vehicle.plateNumber,
+});
   await vehicle.save();
 
   const authData = await buildAccountAuthResponse(req.account);
@@ -397,9 +458,10 @@ const updateMe = asyncHandler(async (req, res) => {
     updateData.name = name.trim();
   }
 
-  if (email && email.trim()) {
-    const cleanEmail = email.trim().toLowerCase();
+ if (email !== undefined) {
+  const cleanEmail = normalizeEmail(email);
 
+  if (cleanEmail) {
     const existingEmail = await Account.findOne({
       email: cleanEmail,
       _id: { $ne: accountId },
@@ -410,26 +472,27 @@ const updateMe = asyncHandler(async (req, res) => {
       error.statusCode = 400;
       throw error;
     }
-
-    updateData.email = cleanEmail;
   }
 
-  if (phone && phone.trim()) {
-    const cleanPhone = phone.trim();
+  updateData.email = cleanEmail;
+}
 
-    const existingPhone = await Account.findOne({
-      phone: cleanPhone,
-      _id: { $ne: accountId },
-    });
+ if (phone && phone.trim()) {
+  const cleanPhone = normalizePhone(phone);
 
-    if (existingPhone) {
-      const error = new Error('رقم الهاتف مستخدم بالفعل');
-      error.statusCode = 400;
-      throw error;
-    }
+  const existingPhone = await Account.findOne({
+    phone: cleanPhone,
+    _id: { $ne: accountId },
+  });
 
-    updateData.phone = cleanPhone;
+  if (existingPhone) {
+    const error = new Error('رقم الهاتف مستخدم بالفعل');
+    error.statusCode = 400;
+    throw error;
   }
+
+  updateData.phone = cleanPhone;
+}
 
   if (password && password.trim()) {
     updateData.password = await bcrypt.hash(password.trim(), 12);
