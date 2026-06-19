@@ -8,7 +8,7 @@ const Rating = require('../models/rating.model');
 const Complaint = require('../models/complaint.model');
 const CommissionTransaction = require('../models/commissionTransaction.model');
 const DriverPayment = require('../models/driverPayment.model');
-
+const Vehicle = require('../models/vehicle.model');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 
@@ -805,6 +805,347 @@ const getDriverPaymentsForAdmin = asyncHandler(async (req, res) => {
   });
 });
 
+const getServiceRequestDetailsForAdmin = asyncHandler(async (req, res) => {
+  const { requestId } = req.params;
+
+  ensureValidId(requestId, 'رقم الطلب غير صحيح');
+
+  const doc = await ServiceRequest.findById(requestId)
+    .populate('customerAccountId', 'name phone email profileImage isActive')
+    .populate('acceptedDriverAccountId', 'name phone email profileImage isActive')
+    .populate('acceptedDriverVehicleId')
+    .populate('vehicleTypeId');
+
+  if (!doc) {
+    const error = new Error('الطلب غير موجود');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const [ratings, complaints] = await Promise.all([
+    Rating.find({ serviceRequestId: requestId })
+      .populate('fromAccountId', 'name phone email')
+      .populate('toAccountId', 'name phone email')
+      .sort({ createdAt: -1 }),
+
+    Complaint.find({ serviceRequestId: requestId })
+      .populate('fromAccountId', 'name phone email')
+      .populate('againstAccountId', 'name phone email')
+      .populate('resolvedByAdminId', 'name phone email')
+      .sort({ createdAt: -1 }),
+  ]);
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب تفاصيل الطلب بنجاح',
+    doc: {
+      request: doc,
+      ratings,
+      complaints,
+    },
+  });
+});
+
+const cancelServiceRequestForAdmin = asyncHandler(async (req, res) => {
+  const { requestId } = req.params;
+  const { reason } = req.body;
+
+  ensureValidId(requestId, 'رقم الطلب غير صحيح');
+
+  const doc = await ServiceRequest.findById(requestId);
+
+  if (!doc) {
+    const error = new Error('الطلب غير موجود');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (doc.status === 'completed') {
+    const error = new Error('لا يمكن إلغاء رحلة مكتملة');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (
+    doc.status === 'cancelled_by_customer' ||
+    doc.status === 'cancelled_by_driver' ||
+    doc.status === 'expired' ||
+    doc.status === 'driver_no_show' ||
+    doc.status === 'customer_no_show'
+  ) {
+    const error = new Error('هذا الطلب منتهي بالفعل');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  doc.status = 'cancelled_by_customer';
+  doc.cancellationReason = reason || 'تم إلغاء الطلب من الإدارة';
+  doc.cancelledAt = new Date();
+
+  await doc.save();
+
+  if (doc.acceptedDriverAccountId) {
+    await DriverProfile.findOneAndUpdate(
+      { accountId: doc.acceptedDriverAccountId },
+      {
+        activeServiceRequestId: null,
+        isAvailable: true,
+      },
+      { new: true }
+    );
+  }
+
+  return sendSuccess({
+    res,
+    message: 'تم إلغاء الطلب من الإدارة بنجاح',
+    doc,
+  });
+});
+
+const getAllComplaintsForAdmin = asyncHandler(async (req, res) => {
+  const {
+    status,
+    category,
+    fromRole,
+    page = 1,
+    limit = 30,
+  } = req.query;
+
+  const query = {};
+
+  if (status) {
+    query.status = status;
+  }
+
+  if (category) {
+    query.category = category;
+  }
+
+  if (fromRole) {
+    query.fromRole = fromRole;
+  }
+
+  const total = await Complaint.countDocuments(query);
+  const { limitNumber, skip, pagination } = buildPagination({
+    page,
+    limit,
+    total,
+  });
+
+  const docs = await Complaint.find(query)
+    .populate('serviceRequestId')
+    .populate('fromAccountId', 'name phone email roles isActive')
+    .populate('againstAccountId', 'name phone email roles isActive')
+    .populate('resolvedByAdminId', 'name phone email')
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limitNumber);
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب الشكاوى بنجاح',
+    docs,
+    extra: {
+      pagination,
+    },
+  });
+});
+
+const getComplaintDetailsForAdmin = asyncHandler(async (req, res) => {
+  const { complaintId } = req.params;
+
+  ensureValidId(complaintId, 'رقم الشكوى غير صحيح');
+
+  const doc = await Complaint.findById(complaintId)
+    .populate('serviceRequestId')
+    .populate('fromAccountId', 'name phone email roles isActive')
+    .populate('againstAccountId', 'name phone email roles isActive')
+    .populate('resolvedByAdminId', 'name phone email');
+
+  if (!doc) {
+    const error = new Error('الشكوى غير موجودة');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب تفاصيل الشكوى بنجاح',
+    doc,
+  });
+});
+
+const updateComplaintStatusForAdmin = asyncHandler(async (req, res) => {
+  const { complaintId } = req.params;
+  const { status, adminNote } = req.body;
+
+  ensureValidId(complaintId, 'رقم الشكوى غير صحيح');
+
+  const allowedStatuses = ['open', 'under_review', 'resolved', 'rejected'];
+
+  if (!allowedStatuses.includes(status)) {
+    const error = new Error('حالة الشكوى غير صحيحة');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const doc = await Complaint.findById(complaintId);
+
+  if (!doc) {
+    const error = new Error('الشكوى غير موجودة');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  doc.status = status;
+  doc.adminNote = adminNote?.toString().trim() || '';
+
+  if (status === 'resolved' || status === 'rejected') {
+    doc.resolvedByAdminId = req.accountId;
+    doc.resolvedAt = new Date();
+  } else {
+    doc.resolvedByAdminId = null;
+    doc.resolvedAt = null;
+  }
+
+  await doc.save();
+
+  const populatedDoc = await Complaint.findById(doc._id)
+    .populate('serviceRequestId')
+    .populate('fromAccountId', 'name phone email roles isActive')
+    .populate('againstAccountId', 'name phone email roles isActive')
+    .populate('resolvedByAdminId', 'name phone email');
+
+  return sendSuccess({
+    res,
+    message: 'تم تحديث حالة الشكوى بنجاح',
+    doc: populatedDoc,
+  });
+});
+
+const getAllVehiclesForAdmin = asyncHandler(async (req, res) => {
+  const { isActive, category } = req.query;
+
+  const query = {};
+
+  if (isActive === 'true') {
+    query.isActive = true;
+  }
+
+  if (isActive === 'false') {
+    query.isActive = false;
+  }
+
+  if (category) {
+    query.category = category;
+  }
+
+  const docs = await Vehicle.find(query).sort({ order: 1, createdAt: -1 });
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب أنواع المركبات بنجاح',
+    docs,
+  });
+});
+
+const createVehicleForAdmin = asyncHandler(async (req, res) => {
+  const {
+    name,
+    code,
+    category,
+    description,
+    seatsCount,
+    maxLoadKg,
+    canCarryPassengers,
+    canCarryGoods,
+    allowedServices,
+    startPrice,
+    pricePerKm,
+    minPrice,
+    commission,
+    requiresLicense,
+    isActive,
+    order,
+  } = req.body;
+
+  const doc = await Vehicle.create({
+    name,
+    code,
+    category,
+    description,
+    seatsCount,
+    maxLoadKg,
+    canCarryPassengers,
+    canCarryGoods,
+    allowedServices,
+    startPrice,
+    pricePerKm,
+    minPrice,
+    commission,
+    requiresLicense,
+    isActive,
+    order,
+  });
+
+  return sendSuccess({
+    res,
+    statusCode: 201,
+    message: 'تم إنشاء نوع المركبة بنجاح',
+    doc,
+  });
+});
+
+const updateVehicleForAdmin = asyncHandler(async (req, res) => {
+  const { vehicleId } = req.params;
+
+  ensureValidId(vehicleId, 'رقم نوع المركبة غير صحيح');
+
+  const allowedFields = [
+    'name',
+    'code',
+    'category',
+    'description',
+    'seatsCount',
+    'maxLoadKg',
+    'canCarryPassengers',
+    'canCarryGoods',
+    'allowedServices',
+    'startPrice',
+    'pricePerKm',
+    'minPrice',
+    'commission',
+    'requiresLicense',
+    'isActive',
+    'order',
+  ];
+
+  const updates = {};
+
+  allowedFields.forEach((field) => {
+    if (req.body[field] !== undefined) {
+      updates[field] = req.body[field];
+    }
+  });
+
+  const doc = await Vehicle.findByIdAndUpdate(vehicleId, updates, {
+    new: true,
+    runValidators: true,
+  });
+
+  if (!doc) {
+    const error = new Error('نوع المركبة غير موجود');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  return sendSuccess({
+    res,
+    message: 'تم تحديث نوع المركبة بنجاح',
+    doc,
+  });
+});
+
 module.exports = {
   getAdminStats,
 
@@ -831,4 +1172,15 @@ module.exports = {
   getFinanceSummary,
   getCommissionTransactionsForAdmin,
   getDriverPaymentsForAdmin,
+
+  getServiceRequestDetailsForAdmin,
+  cancelServiceRequestForAdmin,
+
+  getAllComplaintsForAdmin,
+  getComplaintDetailsForAdmin,
+  updateComplaintStatusForAdmin,
+
+  getAllVehiclesForAdmin,
+  createVehicleForAdmin,
+  updateVehicleForAdmin,
 };

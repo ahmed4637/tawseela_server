@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
-
+const fs = require('fs');
+const path = require('path');
 const Account = require('../models/account.model');
 const DriverProfile = require('../models/driverProfile.model');
 const DriverVehicle = require('../models/driverVehicle.model');
@@ -14,6 +15,81 @@ const normalizeEmail = (email) => {
 
 const normalizePhone = (phone) => {
   return phone ? phone.trim() : '';
+};
+
+const uploadFieldFolders = {
+  nationalIdImage: 'national-ids',
+  profileImage: 'profiles',
+  vehicleImage: 'vehicles',
+  licenseImage: 'licenses',
+};
+
+const normalizeUploadedImagePath = ({ value, fieldName, required = false }) => {
+  const fieldLabel = {
+    nationalIdImage: 'صورة البطاقة',
+    profileImage: 'الصورة الشخصية',
+    vehicleImage: 'صورة المركبة',
+    licenseImage: 'صورة الرخصة',
+  }[fieldName] || 'الصورة';
+
+  if (!value || !value.toString().trim()) {
+    if (required) {
+      const error = new Error(`${fieldLabel} مطلوبة`);
+      error.statusCode = 400;
+      throw error;
+    }
+
+    return '';
+  }
+
+  let cleanValue = value.toString().trim();
+
+  if (cleanValue.startsWith('http://') || cleanValue.startsWith('https://')) {
+    try {
+      const parsedUrl = new URL(cleanValue);
+      cleanValue = parsedUrl.pathname;
+    } catch (error) {
+      const err = new Error(`مسار ${fieldLabel} غير صحيح`);
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  cleanValue = cleanValue.replace(/\\/g, '/');
+  cleanValue = cleanValue.split('?')[0];
+
+  if (cleanValue.startsWith('uploads/')) {
+    cleanValue = `/${cleanValue}`;
+  }
+
+  if (cleanValue.startsWith('/api/uploads/')) {
+    cleanValue = cleanValue.replace('/api/uploads/', '/uploads/');
+  }
+
+  if (!cleanValue.startsWith('/uploads/')) {
+    const error = new Error(`مسار ${fieldLabel} يجب أن يبدأ بـ /uploads`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const expectedFolder = uploadFieldFolders[fieldName];
+
+  if (expectedFolder && !cleanValue.startsWith(`/uploads/${expectedFolder}/`)) {
+    const error = new Error(`${fieldLabel} في فولدر غير صحيح`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const relativePath = cleanValue.replace(/^\/+/, '');
+  const diskPath = path.join(process.cwd(), relativePath);
+
+  if (!fs.existsSync(diskPath)) {
+    const error = new Error(`${fieldLabel} غير موجودة على السيرفر`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return cleanValue;
 };
 
 const plateOptionalVehicleCodes = ['tuktuk', 'tricycle', 'motorcycle'];
@@ -185,9 +261,33 @@ const becomeDriver = asyncHandler(async (req, res) => {
   plateNumber,
 });
 
+const cleanNationalIdImage = normalizeUploadedImagePath({
+  value: nationalIdImage,
+  fieldName: 'nationalIdImage',
+  required: true,
+});
+
+const cleanProfileImage = normalizeUploadedImagePath({
+  value: profileImage,
+  fieldName: 'profileImage',
+  required: false,
+});
+
+const cleanVehicleImage = normalizeUploadedImagePath({
+  value: vehicleImage,
+  fieldName: 'vehicleImage',
+  required: true,
+});
+
+const cleanLicenseImage = normalizeUploadedImagePath({
+  value: licenseImage,
+  fieldName: 'licenseImage',
+  required: false,
+});
+
   const account = req.account;
-  if (profileImage && profileImage.trim()) {
-  account.profileImage = profileImage.trim();
+ if (cleanProfileImage) {
+  account.profileImage = cleanProfileImage;
 }
 
   let driverProfile = await DriverProfile.findOne({
@@ -203,8 +303,8 @@ const becomeDriver = asyncHandler(async (req, res) => {
 
     driverProfile = await DriverProfile.create({
       accountId: account._id,
-      nationalIdImage,
-      profileImage: profileImage || '',
+      nationalIdImage: cleanNationalIdImage,
+      profileImage: cleanProfileImage,
       isApproved: false,
       reviewStatus: 'pending',
       commissionDebt: 0,
@@ -220,8 +320,8 @@ const becomeDriver = asyncHandler(async (req, res) => {
     model: model || '',
     plateNumber: plateNumber || '',
     color: color || '',
-    vehicleImage,
-    licenseImage: licenseImage || '',
+    vehicleImage: cleanVehicleImage,
+    licenseImage: cleanLicenseImage,
     notes: notes || '',
     isApproved: false,
     reviewStatus: 'pending',
@@ -273,6 +373,17 @@ const addDriverVehicle = asyncHandler(async (req, res) => {
   vehicleTypeCode,
   plateNumber,
 });
+const cleanVehicleImage = normalizeUploadedImagePath({
+  value: vehicleImage,
+  fieldName: 'vehicleImage',
+  required: true,
+});
+
+const cleanLicenseImage = normalizeUploadedImagePath({
+  value: licenseImage,
+  fieldName: 'licenseImage',
+  required: false,
+});
 
   const vehicle = await DriverVehicle.create({
     accountId: req.account._id,
@@ -282,8 +393,8 @@ const addDriverVehicle = asyncHandler(async (req, res) => {
     model: model || '',
     plateNumber: plateNumber || '',
     color: color || '',
-    vehicleImage,
-    licenseImage: licenseImage || '',
+    vehicleImage:cleanVehicleImage,
+    licenseImage:cleanLicenseImage,
     notes: notes || '',
     isApproved: false,
     reviewStatus: 'pending',
@@ -367,14 +478,31 @@ const updateDriverVehicle = asyncHandler(async (req, res) => {
   if (color !== undefined) {
     vehicle.color = color || '';
   }
+const cleanVehicleImage =
+  vehicleImage !== undefined
+    ? normalizeUploadedImagePath({
+        value: vehicleImage,
+        fieldName: 'vehicleImage',
+        required: false,
+      })
+    : undefined;
 
-  if (vehicleImage !== undefined && vehicleImage.trim()) {
-    vehicle.vehicleImage = vehicleImage.trim();
-  }
+const cleanLicenseImage =
+  licenseImage !== undefined
+    ? normalizeUploadedImagePath({
+        value: licenseImage,
+        fieldName: 'licenseImage',
+        required: false,
+      })
+    : undefined;
 
-  if (licenseImage !== undefined) {
-    vehicle.licenseImage = licenseImage || '';
-  }
+ if (cleanVehicleImage) {
+  vehicle.vehicleImage = cleanVehicleImage;
+}
+
+if (cleanLicenseImage !== undefined) {
+  vehicle.licenseImage = cleanLicenseImage;
+}
 
   if (notes !== undefined) {
     vehicle.notes = notes || '';
@@ -498,9 +626,13 @@ const updateMe = asyncHandler(async (req, res) => {
     updateData.password = await bcrypt.hash(password.trim(), 12);
   }
 
-  if (profileImage && profileImage.trim()) {
-    updateData.profileImage = profileImage.trim();
-  }
+  if (profileImage !== undefined && profileImage.toString().trim()) {
+  updateData.profileImage = normalizeUploadedImagePath({
+    value: profileImage,
+    fieldName: 'profileImage',
+    required: false,
+  });
+}
 
   const account = await Account.findByIdAndUpdate(accountId, updateData, {
     new: true,

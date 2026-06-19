@@ -27,6 +27,17 @@ const {
   getFinanceSummary,
   getCommissionTransactionsForAdmin,
   getDriverPaymentsForAdmin,
+
+  getServiceRequestDetailsForAdmin,
+cancelServiceRequestForAdmin,
+
+getAllComplaintsForAdmin,
+getComplaintDetailsForAdmin,
+updateComplaintStatusForAdmin,
+
+getAllVehiclesForAdmin,
+createVehicleForAdmin,
+updateVehicleForAdmin,
 } = require('../controllers/admin.controller');
 
 const validateRequest = require('../middlewares/validateRequest');
@@ -108,13 +119,79 @@ router.patch('/driver-vehicles/:driverVehicleId/reject', [
 ], validateRequest, rejectDriverVehicle);
 
 router.get('/requests', getAllServiceRequestsForAdmin);
+router.get('/requests/:requestId', [
+  param('requestId')
+    .isMongoId()
+    .withMessage('رقم الطلب غير صحيح'),
+], validateRequest, getServiceRequestDetailsForAdmin);
+
+router.patch('/requests/:requestId/cancel', [
+  param('requestId')
+    .isMongoId()
+    .withMessage('رقم الطلب غير صحيح'),
+
+  body('reason')
+    .optional({ checkFalsy: true })
+    .trim(),
+], validateRequest, cancelServiceRequestForAdmin);
 
 router.get('/ratings', getAllRatingsForAdmin);
+router.get('/complaints', getAllComplaintsForAdmin);
+
+router.get('/complaints/:complaintId', [
+  param('complaintId')
+    .isMongoId()
+    .withMessage('رقم الشكوى غير صحيح'),
+], validateRequest, getComplaintDetailsForAdmin);
+
+router.patch('/complaints/:complaintId/status', [
+  param('complaintId')
+    .isMongoId()
+    .withMessage('رقم الشكوى غير صحيح'),
+
+  body('status')
+    .isIn(['open', 'under_review', 'resolved', 'rejected'])
+    .withMessage('حالة الشكوى غير صحيحة'),
+
+  body('adminNote')
+    .optional({ checkFalsy: true })
+    .trim(),
+], validateRequest, updateComplaintStatusForAdmin);
 
 router.get('/finance/summary', getFinanceSummary);
 
 router.get('/finance/commissions', getCommissionTransactionsForAdmin);
 
 router.get('/finance/payments', getDriverPaymentsForAdmin);
+
+router.get('/vehicles', getAllVehiclesForAdmin);
+
+router.post('/vehicles', [
+  body('name')
+    .trim()
+    .notEmpty()
+    .withMessage('اسم المركبة مطلوب'),
+
+  body('code')
+    .trim()
+    .notEmpty()
+    .withMessage('كود المركبة مطلوب'),
+
+  body('category')
+    .optional()
+    .isIn(['passenger', 'goods', 'mixed'])
+    .withMessage('تصنيف المركبة غير صحيح'),
+], validateRequest, createVehicleForAdmin);
+
+router.patch('/vehicles/:vehicleId', [
+  param('vehicleId')
+    .isMongoId()
+    .withMessage('رقم نوع المركبة غير صحيح'),
+
+  body('category')
+    .optional()
+    .isIn(['passenger', 'goods', 'mixed'])
+    .withMessage('تصنيف المركبة غير صحيح'),
+], validateRequest, updateVehicleForAdmin);
 
 module.exports = router;
