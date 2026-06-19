@@ -46,7 +46,18 @@ const buildAccountSearchQuery = (search) => {
     return {};
   }
 
-  const buildDateRangeQuery = (query) => {
+  const regex = new RegExp(search.toString().trim(), 'i');
+
+  return {
+    $or: [
+      { name: regex },
+      { phone: regex },
+      { email: regex },
+    ],
+  };
+};
+
+const buildDateRangeQuery = (query) => {
   const {
     period,
     dateFrom,
@@ -104,17 +115,6 @@ const buildAccountSearchQuery = (search) => {
 
   return {
     createdAt,
-  };
-};
-
-  const regex = new RegExp(search.toString().trim(), 'i');
-
-  return {
-    $or: [
-      { name: regex },
-      { phone: regex },
-      { email: regex },
-    ],
   };
 };
 
