@@ -46,6 +46,67 @@ const buildAccountSearchQuery = (search) => {
     return {};
   }
 
+  const buildDateRangeQuery = (query) => {
+  const {
+    period,
+    dateFrom,
+    dateTo,
+    year,
+    month,
+  } = query;
+
+  const now = new Date();
+  let startDate = null;
+  let endDate = null;
+
+  if (dateFrom || dateTo) {
+    if (dateFrom) {
+      startDate = new Date(dateFrom);
+      startDate.setHours(0, 0, 0, 0);
+    }
+
+    if (dateTo) {
+      endDate = new Date(dateTo);
+      endDate.setHours(23, 59, 59, 999);
+    }
+  } else if (period === 'daily') {
+    startDate = new Date(now);
+    startDate.setHours(0, 0, 0, 0);
+
+    endDate = new Date(now);
+    endDate.setHours(23, 59, 59, 999);
+  } else if (period === 'monthly') {
+    const selectedYear = Number(year) || now.getFullYear();
+    const selectedMonth = Number(month) || now.getMonth() + 1;
+
+    startDate = new Date(selectedYear, selectedMonth - 1, 1, 0, 0, 0, 0);
+    endDate = new Date(selectedYear, selectedMonth, 0, 23, 59, 59, 999);
+  } else if (period === 'yearly') {
+    const selectedYear = Number(year) || now.getFullYear();
+
+    startDate = new Date(selectedYear, 0, 1, 0, 0, 0, 0);
+    endDate = new Date(selectedYear, 11, 31, 23, 59, 59, 999);
+  }
+
+  if (!startDate && !endDate) {
+    return {};
+  }
+
+  const createdAt = {};
+
+  if (startDate) {
+    createdAt.$gte = startDate;
+  }
+
+  if (endDate) {
+    createdAt.$lte = endDate;
+  }
+
+  return {
+    createdAt,
+  };
+};
+
   const regex = new RegExp(search.toString().trim(), 'i');
 
   return {
@@ -656,6 +717,8 @@ const getAllRatingsForAdmin = asyncHandler(async (req, res) => {
 });
 
 const getFinanceSummary = asyncHandler(async (req, res) => {
+  const dateQuery = buildDateRangeQuery(req.query);
+
   const [
     unpaidCommissionAgg,
     paidCommissionAgg,
@@ -666,17 +729,17 @@ const getFinanceSummary = asyncHandler(async (req, res) => {
     recentCommissions,
   ] = await Promise.all([
     CommissionTransaction.aggregate([
-      { $match: { status: 'unpaid' } },
+      { $match: { status: 'unpaid', ...dateQuery } },
       { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
     ]),
 
     CommissionTransaction.aggregate([
-      { $match: { status: 'paid' } },
+     { $match: { status: 'paid', ...dateQuery } },
       { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
     ]),
 
     DriverPayment.aggregate([
-      { $match: { status: 'confirmed' } },
+     { $match: { status: 'confirmed', ...dateQuery } },
       { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
     ]),
 
@@ -684,12 +747,12 @@ const getFinanceSummary = asyncHandler(async (req, res) => {
 
     DriverProfile.countDocuments({ isBlockedForDebt: true }),
 
-    DriverPayment.find({ status: 'confirmed' })
+   DriverPayment.find({ status: 'confirmed', ...dateQuery })
       .populate('driverAccountId', 'name phone email')
       .sort({ createdAt: -1 })
       .limit(10),
 
-    CommissionTransaction.find()
+   CommissionTransaction.find(dateQuery)
       .populate('driverAccountId', 'name phone email')
       .sort({ createdAt: -1 })
       .limit(10),
@@ -699,7 +762,14 @@ const getFinanceSummary = asyncHandler(async (req, res) => {
     res,
     message: 'تم جلب الملخص المالي بنجاح',
     doc: {
-      unpaidCommissions: {
+  period: {
+    period: req.query.period || '',
+    dateFrom: req.query.dateFrom || '',
+    dateTo: req.query.dateTo || '',
+    year: req.query.year || '',
+    month: req.query.month || '',
+  },
+  unpaidCommissions: {
         total: unpaidCommissionAgg[0]?.total || 0,
         count: unpaidCommissionAgg[0]?.count || 0,
       },
@@ -728,6 +798,8 @@ const getCommissionTransactionsForAdmin = asyncHandler(async (req, res) => {
   } = req.query;
 
   const query = {};
+
+  Object.assign(query, buildDateRangeQuery(req.query));
 
   if (status) {
     query.status = status;
@@ -771,6 +843,8 @@ const getDriverPaymentsForAdmin = asyncHandler(async (req, res) => {
   } = req.query;
 
   const query = {};
+
+  Object.assign(query, buildDateRangeQuery(req.query));
 
   if (driverAccountId) {
     ensureValidId(driverAccountId, 'رقم حساب السائق غير صحيح');
