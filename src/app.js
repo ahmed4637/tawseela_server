@@ -17,6 +17,7 @@ const notificationRoutes = require('./routes/notification.routes');
 const ratingRoutes = require('./routes/rating.routes');
 const complaintRoutes = require('./routes/complaint.routes');
 const settingsRoutes = require('./routes/settings.routes');
+const mapRoutes = require('./routes/map.routes');
 
 const errorHandler = require('./middlewares/errorHandler');
 
@@ -62,6 +63,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/complaints', complaintRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/maps', mapRoutes);
 
 app.use((req, res) => {
   return sendError({
