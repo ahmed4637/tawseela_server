@@ -340,73 +340,88 @@ const initSocketServer = (httpServer) => {
       }
     });
 
-    socket.on('driver:location', async (payload = {}, callback) => {
-      try {
-        if (!socket.roles.includes('driver')) {
-          throw new Error('هذا الإجراء متاح للسائق فقط');
-        }
+   socket.on('driver:location', async (payload = {}, callback) => {
+  try {
+    if (!socket.roles.includes('driver')) {
+      throw new Error('هذا الإجراء متاح للسائق فقط');
+    }
 
-        const { lat, lng } = payload;
+    const lat = Number(payload.lat ?? payload.latitude);
+    const lng = Number(payload.lng ?? payload.longitude);
 
-        if (lat === undefined || lng === undefined) {
-          throw new Error('الموقع مطلوب');
-        }
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      throw new Error('الموقع مطلوب');
+    }
 
-        const driverProfile = await DriverProfile.findOne({
-          accountId: socket.accountId,
-        });
+    const requestIdFromPayload = (
+      payload.requestId ||
+      payload.serviceRequestId ||
+      payload.rideId ||
+      ''
+    )
+      .toString()
+      .trim();
 
-        if (!driverProfile) {
-          throw new Error('ملف السائق غير موجود');
-        }
-
-        driverProfile.currentLat = Number(lat);
-        driverProfile.currentLng = Number(lng);
-        driverProfile.currentLocation = {
-          type: 'Point',
-          coordinates: [Number(lng), Number(lat)],
-        };
-        
-        await driverProfile.save();
-
-        if (driverProfile.activeServiceRequestId) {
-          emitToRequest(
-            driverProfile.activeServiceRequestId.toString(),
-            'driver:location-updated',
-            {
-              driverAccountId: socket.accountId,
-              lat: driverProfile.currentLat,
-              lng: driverProfile.currentLng,
-              serviceRequestId:
-                driverProfile.activeServiceRequestId.toString(),
-              updatedAt: new Date(),
-            }
-          );
-        }
-
-        ioInstance.to('admins').emit('driver:location-updated', {
-          driverAccountId: socket.accountId,
-          lat: driverProfile.currentLat,
-          lng: driverProfile.currentLng,
-          activeServiceRequestId: driverProfile.activeServiceRequestId,
-          updatedAt: new Date(),
-        });
-
-        if (callback) {
-          callback({
-            success: true,
-            message: 'تم تحديث موقع السائق',
-          });
-        }
-      } catch (error) {
-        if (callback) {
-          callback({
-            success: false,
-            message: error.message,
-          });
-        }
-      }
+    const driverProfile = await DriverProfile.findOne({
+      accountId: socket.accountId,
     });
+
+    if (!driverProfile) {
+      throw new Error('ملف السائق غير موجود');
+    }
+
+    driverProfile.currentLat = lat;
+    driverProfile.currentLng = lng;
+    driverProfile.currentLocation = {
+      type: 'Point',
+      coordinates: [lng, lat],
+    };
+
+    await driverProfile.save();
+
+    const activeRequestId =
+      driverProfile.activeServiceRequestId?.toString() || requestIdFromPayload;
+
+    const locationPayload = {
+      driverAccountId: socket.accountId,
+      lat,
+      lng,
+      latitude: lat,
+      longitude: lng,
+      requestId: activeRequestId,
+      serviceRequestId: activeRequestId,
+      rideId: activeRequestId,
+      updatedAt: new Date(),
+    };
+
+    if (activeRequestId) {
+      emitToRequest(
+        activeRequestId,
+        'driver:location-updated',
+        locationPayload
+      );
+    }
+
+    ioInstance.to('admins').emit('driver:location-updated', {
+      ...locationPayload,
+      activeServiceRequestId: activeRequestId,
+    });
+
+    if (callback) {
+      callback({
+        success: true,
+        message: 'تم تحديث موقع السائق',
+      });
+    }
+  } catch (error) {
+    if (callback) {
+      callback({
+        success: false,
+        message: error.message,
+      });
+    }
+  }
+});
 
     socket.on('disconnect', () => {
       console.log(`Socket disconnected: ${socket.accountId}`);
