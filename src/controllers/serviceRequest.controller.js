@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const ServiceRequest = require('../models/serviceRequest.model');
 const ServiceOffer = require('../models/serviceOffer.model');
+const Rating = require('../models/rating.model');
 const Vehicle = require('../models/vehicle.model');
 const DriverProfile = require('../models/driverProfile.model');
 const DriverVehicle = require('../models/driverVehicle.model');
@@ -586,12 +587,121 @@ const getAvailableServiceRequestsForDriver = asyncHandler(async (req, res) => {
   });
 });
 
-const getServiceRequestById = asyncHandler(async (req, res) => {
-  const request = await ensureRequestExists(req.params.id);
+const buildAccountRatingSummary = async (accountId) => {
+  if (!accountId) {
+    return {
+      ratingAverage: 0,
+      ratingCount: 0,
+    };
+  }
 
-  const isCustomer = request.customerAccountId.toString() === req.accountId;
+  const stats = await Rating.aggregate([
+    {
+      $match: {
+        toAccountId: new mongoose.Types.ObjectId(accountId),
+      },
+    },
+    {
+      $group: {
+        _id: '$toAccountId',
+        ratingAverage: { $avg: '$stars' },
+        ratingCount: { $sum: 1 },
+      },
+    },
+  ]);
+
+  if (!stats.length) {
+    return {
+      ratingAverage: 0,
+      ratingCount: 0,
+    };
+  }
+
+  return {
+    ratingAverage: Math.round((stats[0].ratingAverage || 0) * 10) / 10,
+    ratingCount: stats[0].ratingCount || 0,
+  };
+};
+
+const attachPeopleAndVehicleInfo = async (requestDoc, offers = []) => {
+  const request = requestDoc.toObject ? requestDoc.toObject() : { ...requestDoc };
+
+  const customerAccountId =
+    request.customerAccountId?._id || request.customerAccountId || null;
+
+  const driverAccountId =
+    request.acceptedDriverAccountId?._id ||
+    request.acceptedDriverAccountId ||
+    null;
+
+  const [customerRating, driverProfile, driverRating] = await Promise.all([
+    buildAccountRatingSummary(customerAccountId),
+    driverAccountId
+      ? DriverProfile.findOne({ accountId: driverAccountId })
+      : null,
+    buildAccountRatingSummary(driverAccountId),
+  ]);
+
+  if (request.customerAccountId && typeof request.customerAccountId === 'object') {
+    request.customerAccountId = {
+      ...request.customerAccountId,
+      ratingAverage: customerRating.ratingAverage,
+      ratingCount: customerRating.ratingCount,
+    };
+  }
+
+  if (request.acceptedDriverAccountId && typeof request.acceptedDriverAccountId === 'object') {
+    request.acceptedDriverAccountId = {
+      ...request.acceptedDriverAccountId,
+      ratingAverage:
+        driverProfile?.ratingAverage || driverRating.ratingAverage,
+      ratingCount:
+        driverProfile?.ratingCount || driverRating.ratingCount,
+      driverProfile: driverProfile || null,
+    };
+  }
+
+  const enrichedOffers = [];
+
+  for (const offerDoc of offers) {
+    const offer = offerDoc.toObject ? offerDoc.toObject() : { ...offerDoc };
+
+    const offerDriverAccountId =
+      offer.driverAccountId?._id || offer.driverAccountId || null;
+
+    const [offerDriverProfile, offerDriverRating] = await Promise.all([
+      offerDriverAccountId
+        ? DriverProfile.findOne({ accountId: offerDriverAccountId })
+        : null,
+      buildAccountRatingSummary(offerDriverAccountId),
+    ]);
+
+    if (offer.driverAccountId && typeof offer.driverAccountId === 'object') {
+      offer.driverAccountId = {
+        ...offer.driverAccountId,
+        ratingAverage:
+          offerDriverProfile?.ratingAverage || offerDriverRating.ratingAverage,
+        ratingCount:
+          offerDriverProfile?.ratingCount || offerDriverRating.ratingCount,
+        driverProfile: offerDriverProfile || null,
+      };
+    }
+
+    enrichedOffers.push(offer);
+  }
+
+  return {
+    request,
+    offers: enrichedOffers,
+  };
+};
+
+const getServiceRequestById = asyncHandler(async (req, res) => {
+  const baseRequest = await ensureRequestExists(req.params.id);
+
+  const isCustomer = baseRequest.customerAccountId.toString() === req.accountId;
   const isAcceptedDriver =
-    request.acceptedDriverAccountId?.toString() === req.accountId;
+    baseRequest.acceptedDriverAccountId?.toString() === req.accountId;
 
   if (!isCustomer && !isAcceptedDriver && !req.roles?.includes('admin')) {
     const error = new Error('غير مسموح لك بعرض هذا الطلب');
@@ -599,18 +709,39 @@ const getServiceRequestById = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  const request = await ServiceRequest.findById(baseRequest._id)
+    .populate('customerAccountId', 'name phone email profileImage image photo avatar')
+    .populate('acceptedDriverAccountId', 'name phone email profileImage image photo avatar')
+    .populate('acceptedDriverVehicleId')
+    .populate('vehicleTypeId');
+
   const offers = await ServiceOffer.find({
-    serviceRequestId: request._id,
-  }).sort({
-    createdAt: -1,
-  });
+    serviceRequestId: baseRequest._id,
+  })
+    .populate('driverAccountId', 'name phone email profileImage image photo avatar')
+    .populate('driverVehicleId')
+    .sort({
+      createdAt: -1,
+    });
+
+  const enriched = await attachPeopleAndVehicleInfo(request, offers);
+
+  const acceptedOffer =
+    enriched.offers.find((offer) => {
+      return (
+        offer._id?.toString() ===
+          enriched.request.acceptedOfferId?.toString() ||
+        offer.status === 'accepted'
+      );
+    }) || null;
 
   return sendSuccess({
     res,
     message: 'تم جلب تفاصيل الطلب بنجاح',
     doc: {
-      request,
-      offers,
+      request: enriched.request,
+      offers: enriched.offers,
+      acceptedOffer,
     },
   });
 });
