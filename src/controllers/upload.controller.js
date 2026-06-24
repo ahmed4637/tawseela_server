@@ -1,21 +1,34 @@
 const { sendSuccess } = require('../utils/apiResponse');
 
+
+const getFirstHeaderValue = (value) => {
+  if (!value) return '';
+
+  if (Array.isArray(value)) {
+    return value[0]?.toString().split(',')[0].trim() || '';
+  }
+
+  return value.toString().split(',')[0].trim();
+};
+
 const getPublicBaseUrl = (req) => {
   if (process.env.PUBLIC_BASE_URL) {
     return process.env.PUBLIC_BASE_URL.replace(/\/$/, '');
   }
 
   const protocol =
-    req.headers['x-forwarded-proto'] ||
+    getFirstHeaderValue(req.headers['x-forwarded-proto']) ||
     req.protocol ||
     'https';
 
   const host =
-    req.headers['x-forwarded-host'] ||
-    req.get('host');
+    getFirstHeaderValue(req.headers['x-forwarded-host']) ||
+    req.get('host') ||
+    '';
 
   return `${protocol}://${host}`;
 };
+
 
 const uploadSingleImage = (req, res) => {
   if (!req.file) {
