@@ -1,5 +1,7 @@
+
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 
 const Account = require('../models/account.model');
 const DriverProfile = require('../models/driverProfile.model');
@@ -9,6 +11,33 @@ const ServiceRequest = require('../models/serviceRequest.model');
 let ioInstance = null;
 
 const isDevelopment = process.env.NODE_ENV === 'development';
+
+const getFirstHeaderValue = (value) => {
+  if (!value) return '';
+
+  if (Array.isArray(value)) {
+    return value[0]?.toString().split(',')[0].trim() || '';
+  }
+
+  return value.toString().split(',')[0].trim();
+};
+
+const getSocketToken = (socket) => {
+  const authToken = socket.handshake.auth?.token;
+  const queryToken = socket.handshake.query?.token;
+  const headerToken =
+    getFirstHeaderValue(socket.handshake.headers?.authorization) ||
+    getFirstHeaderValue(socket.handshake.headers?.Authorization);
+
+  return (authToken || queryToken || headerToken || '')
+    .toString()
+    .replace(/^Bearer\s+/i, '')
+    .trim();
+};
+
+const isValidObjectId = (value) => {
+  return mongoose.Types.ObjectId.isValid(value?.toString() || '');
+};
 
 const getIO = () => {
   if (!ioInstance) {
@@ -44,18 +73,13 @@ const emitToVehicle = (vehicleTypeCode, eventName, payload) => {
 
 const authenticateSocket = async (socket, next) => {
   try {
-    const token =
-      socket.handshake.auth?.token ||
-      socket.handshake.query?.token ||
-      '';
+    const cleanToken = getSocketToken(socket);
 
-    if (!token) {
+    if (!cleanToken) {
       return next(new Error('Token مطلوب للاتصال'));
     }
 
-    const cleanToken = token.toString().replace('Bearer ', '').trim();
     const decoded = jwt.verify(cleanToken, process.env.JWT_SECRET);
-
     const accountId = decoded.accountId || decoded.userId;
 
     if (!accountId) {
@@ -124,6 +148,10 @@ const joinDriverVehicleRooms = async (socket) => {
 };
 
 const canJoinRequestRoom = async ({ socket, requestId }) => {
+  if (!isValidObjectId(requestId)) {
+    return false;
+  }
+
   const request = await ServiceRequest.findById(requestId);
 
   if (!request) {
@@ -153,6 +181,8 @@ const initSocketServer = (httpServer) => {
   ioInstance.on('connection', async (socket) => {
     console.log(`Socket connected: ${socket.accountId}`);
 
+    let lastDriverLocationDbSaveAt = 0;
+
     socket.join(getAccountRoom(socket.accountId));
 
     if (socket.roles.includes('admin')) {
@@ -181,7 +211,14 @@ const initSocketServer = (httpServer) => {
 
     socket.on('request:join', async (payload = {}, callback) => {
       try {
-        const { requestId } = payload;
+        const requestId = (
+          payload.requestId ||
+          payload.serviceRequestId ||
+          payload.rideId ||
+          ''
+        )
+          .toString()
+          .trim();
 
         if (!requestId) {
           throw new Error('رقم الطلب مطلوب');
@@ -215,7 +252,14 @@ const initSocketServer = (httpServer) => {
     });
 
     socket.on('request:leave', (payload = {}, callback) => {
-      const { requestId } = payload;
+      const requestId = (
+        payload.requestId ||
+        payload.serviceRequestId ||
+        payload.rideId ||
+        ''
+      )
+        .toString()
+        .trim();
 
       if (requestId) {
         socket.leave(getRequestRoom(requestId));
@@ -237,6 +281,17 @@ const initSocketServer = (httpServer) => {
 
         const { lat, lng } = payload;
 
+        const hasLocation = lat !== undefined || lng !== undefined;
+        const latNumber = Number(lat);
+        const lngNumber = Number(lng);
+
+        if (
+          hasLocation &&
+          (!Number.isFinite(latNumber) || !Number.isFinite(lngNumber))
+        ) {
+          throw new Error('الموقع غير صحيح');
+        }
+
         const driverProfile = await DriverProfile.findOne({
           accountId: socket.accountId,
         });
@@ -257,12 +312,12 @@ const initSocketServer = (httpServer) => {
         driverProfile.isOnline = true;
         driverProfile.lastOnlineAt = new Date();
 
-        if (lat !== undefined && lng !== undefined) {
-          driverProfile.currentLat = Number(lat);
-          driverProfile.currentLng = Number(lng);
+        if (hasLocation) {
+          driverProfile.currentLat = latNumber;
+          driverProfile.currentLng = lngNumber;
           driverProfile.currentLocation = {
             type: 'Point',
-            coordinates: [Number(lng), Number(lat)],
+            coordinates: [lngNumber, latNumber],
           };
         }
 
@@ -340,88 +395,114 @@ const initSocketServer = (httpServer) => {
       }
     });
 
-   socket.on('driver:location', async (payload = {}, callback) => {
-  try {
-    if (!socket.roles.includes('driver')) {
-      throw new Error('هذا الإجراء متاح للسائق فقط');
-    }
+    socket.on('driver:location', async (payload = {}, callback) => {
+      try {
+        if (!socket.roles.includes('driver')) {
+          throw new Error('هذا الإجراء متاح للسائق فقط');
+        }
 
-    const lat = Number(payload.lat ?? payload.latitude);
-    const lng = Number(payload.lng ?? payload.longitude);
+        const lat = Number(payload.lat ?? payload.latitude);
+        const lng = Number(payload.lng ?? payload.longitude);
 
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-      throw new Error('الموقع مطلوب');
-    }
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+          throw new Error('الموقع مطلوب');
+        }
 
-    const requestIdFromPayload = (
-      payload.requestId ||
-      payload.serviceRequestId ||
-      payload.rideId ||
-      ''
-    )
-      .toString()
-      .trim();
+        const requestIdFromPayload = (
+          payload.requestId ||
+          payload.serviceRequestId ||
+          payload.rideId ||
+          ''
+        )
+          .toString()
+          .trim();
 
-    const driverProfile = await DriverProfile.findOne({
-      accountId: socket.accountId,
+        const driverProfile = await DriverProfile.findOne({
+          accountId: socket.accountId,
+        });
+
+        if (!driverProfile) {
+          throw new Error('ملف السائق غير موجود');
+        }
+
+        let activeRequestId =
+          driverProfile.activeServiceRequestId?.toString() || '';
+
+        if (!activeRequestId && requestIdFromPayload) {
+          if (!isValidObjectId(requestIdFromPayload)) {
+            throw new Error('رقم الطلب غير صحيح');
+          }
+
+          const request = await ServiceRequest.findById(requestIdFromPayload)
+            .select('acceptedDriverAccountId status')
+            .lean();
+
+          const isAcceptedDriver =
+            request?.acceptedDriverAccountId?.toString() === socket.accountId;
+
+          if (!request || !isAcceptedDriver) {
+            throw new Error('غير مسموح بتحديث موقع هذا الطلب');
+          }
+
+          activeRequestId = requestIdFromPayload;
+        }
+
+        const now = Date.now();
+        const shouldSaveLocation = now - lastDriverLocationDbSaveAt >= 3000;
+
+        if (shouldSaveLocation) {
+          driverProfile.currentLat = lat;
+          driverProfile.currentLng = lng;
+          driverProfile.currentLocation = {
+            type: 'Point',
+            coordinates: [lng, lat],
+          };
+
+          await driverProfile.save();
+
+          lastDriverLocationDbSaveAt = now;
+        }
+
+        const locationPayload = {
+          driverAccountId: socket.accountId,
+          lat,
+          lng,
+          latitude: lat,
+          longitude: lng,
+          requestId: activeRequestId,
+          serviceRequestId: activeRequestId,
+          rideId: activeRequestId,
+          updatedAt: new Date(),
+        };
+
+        if (activeRequestId) {
+          emitToRequest(
+            activeRequestId,
+            'driver:location-updated',
+            locationPayload
+          );
+        }
+
+        ioInstance.to('admins').emit('driver:location-updated', {
+          ...locationPayload,
+          activeServiceRequestId: activeRequestId,
+        });
+
+        if (callback) {
+          callback({
+            success: true,
+            message: 'تم تحديث موقع السائق',
+          });
+        }
+      } catch (error) {
+        if (callback) {
+          callback({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
     });
-
-    if (!driverProfile) {
-      throw new Error('ملف السائق غير موجود');
-    }
-
-    driverProfile.currentLat = lat;
-    driverProfile.currentLng = lng;
-    driverProfile.currentLocation = {
-      type: 'Point',
-      coordinates: [lng, lat],
-    };
-
-    await driverProfile.save();
-
-    const activeRequestId =
-      driverProfile.activeServiceRequestId?.toString() || requestIdFromPayload;
-
-    const locationPayload = {
-      driverAccountId: socket.accountId,
-      lat,
-      lng,
-      latitude: lat,
-      longitude: lng,
-      requestId: activeRequestId,
-      serviceRequestId: activeRequestId,
-      rideId: activeRequestId,
-      updatedAt: new Date(),
-    };
-
-    if (activeRequestId) {
-      emitToRequest(
-        activeRequestId,
-        'driver:location-updated',
-        locationPayload
-      );
-    }
-
-    ioInstance.to('admins').emit('driver:location-updated', {
-      ...locationPayload,
-      activeServiceRequestId: activeRequestId,
-    });
-
-    if (callback) {
-      callback({
-        success: true,
-        message: 'تم تحديث موقع السائق',
-      });
-    }
-  } catch (error) {
-    if (callback) {
-      callback({
-        success: false,
-        message: error.message,
-      });
-    }
-  }
-});
 
     socket.on('disconnect', () => {
       console.log(`Socket disconnected: ${socket.accountId}`);
