@@ -16,7 +16,6 @@ const {
   getIO,
   emitToAccount,
   emitToRequest,
-  emitToVehicle,
 } = require('../sockets/socket.server');
 
 const isDevelopment = process.env.NODE_ENV === 'development';
@@ -586,6 +585,27 @@ const getAvailableServiceRequestsForDriver = asyncHandler(async (req, res) => {
     docs,
   });
 });
+const accountPublicFields = 'name profileImage image photo avatar';
+const accountContactFields = 'name phone profileImage image photo avatar';
+
+const driverVehiclePublicFields =
+  'vehicleTypeCode vehicleTypeName plateNumber vehicleNumber vehicleImage image photo vehiclePhoto carImage brand model color';
+
+const confirmedStatuses = [
+  'offer_accepted',
+  'driver_arriving',
+  'arrived_to_pickup',
+  'in_progress',
+  'completed',
+];
+
+const toPlainObject = (doc) => {
+  if (!doc) return null;
+
+  return doc.toObject && typeof doc.toObject === 'function'
+    ? doc.toObject()
+    : { ...doc };
+};
 
 const buildAccountRatingSummary = async (accountId) => {
   if (!accountId) {
@@ -623,77 +643,147 @@ const buildAccountRatingSummary = async (accountId) => {
   };
 };
 
-const attachPeopleAndVehicleInfo = async (requestDoc, offers = []) => {
-  const request = requestDoc.toObject ? requestDoc.toObject() : { ...requestDoc };
+const enrichAccountObject = async (accountObject) => {
+  if (!accountObject) return accountObject;
 
-  const customerAccountId =
-    request.customerAccountId?._id || request.customerAccountId || null;
-
-  const driverAccountId =
-    request.acceptedDriverAccountId?._id ||
-    request.acceptedDriverAccountId ||
-    null;
-
-  const [customerRating, driverProfile, driverRating] = await Promise.all([
-    buildAccountRatingSummary(customerAccountId),
-    driverAccountId
-      ? DriverProfile.findOne({ accountId: driverAccountId })
-      : null,
-    buildAccountRatingSummary(driverAccountId),
-  ]);
-
-  if (request.customerAccountId && typeof request.customerAccountId === 'object') {
-    request.customerAccountId = {
-      ...request.customerAccountId,
-      ratingAverage: customerRating.ratingAverage,
-      ratingCount: customerRating.ratingCount,
-    };
-  }
-
-  if (request.acceptedDriverAccountId && typeof request.acceptedDriverAccountId === 'object') {
-    request.acceptedDriverAccountId = {
-      ...request.acceptedDriverAccountId,
-      ratingAverage:
-        driverProfile?.ratingAverage || driverRating.ratingAverage,
-      ratingCount:
-        driverProfile?.ratingCount || driverRating.ratingCount,
-      driverProfile: driverProfile || null,
-    };
-  }
-
-  const enrichedOffers = [];
-
-  for (const offerDoc of offers) {
-    const offer = offerDoc.toObject ? offerDoc.toObject() : { ...offerDoc };
-
-    const offerDriverAccountId =
-      offer.driverAccountId?._id || offer.driverAccountId || null;
-
-    const [offerDriverProfile, offerDriverRating] = await Promise.all([
-      offerDriverAccountId
-        ? DriverProfile.findOne({ accountId: offerDriverAccountId })
-        : null,
-      buildAccountRatingSummary(offerDriverAccountId),
-    ]);
-
-    if (offer.driverAccountId && typeof offer.driverAccountId === 'object') {
-      offer.driverAccountId = {
-        ...offer.driverAccountId,
-        ratingAverage:
-          offerDriverProfile?.ratingAverage || offerDriverRating.ratingAverage,
-        ratingCount:
-          offerDriverProfile?.ratingCount || offerDriverRating.ratingCount,
-        driverProfile: offerDriverProfile || null,
-      };
-    }
-
-    enrichedOffers.push(offer);
-  }
+  const raw = toPlainObject(accountObject);
+  const accountId = raw._id || raw.id || null;
+  const rating = await buildAccountRatingSummary(accountId);
 
   return {
-    request,
-    offers: enrichedOffers,
+    ...raw,
+    ratingAverage: rating.ratingAverage,
+    ratingCount: rating.ratingCount,
   };
+};
+
+const enrichDriverAccountObject = async (accountObject) => {
+  if (!accountObject) return accountObject;
+
+  const raw = toPlainObject(accountObject);
+  const accountId = raw._id || raw.id || null;
+
+  const [profile, rating] = await Promise.all([
+    accountId ? DriverProfile.findOne({ accountId }) : null,
+    buildAccountRatingSummary(accountId),
+  ]);
+
+  return {
+    ...raw,
+    ratingAverage: profile?.ratingAverage || rating.ratingAverage,
+    ratingCount: profile?.ratingCount || rating.ratingCount,
+    driverProfile: profile
+      ? {
+          totalCompletedTrips: profile.totalCompletedTrips || 0,
+          ratingAverage: profile.ratingAverage || rating.ratingAverage,
+          ratingCount: profile.ratingCount || rating.ratingCount,
+        }
+      : null,
+  };
+};
+
+const buildEnrichedOffer = async (offerDoc) => {
+  const offer = toPlainObject(offerDoc);
+
+  if (!offer) return null;
+
+  if (offer.driverAccountId && typeof offer.driverAccountId === 'object') {
+    offer.driverAccountId = await enrichDriverAccountObject(
+      offer.driverAccountId
+    );
+  }
+
+  return offer;
+};
+
+const loadEnrichedOfferById = async (offerId) => {
+  const offer = await ServiceOffer.findById(offerId)
+    .populate('driverAccountId', accountPublicFields)
+    .populate('driverVehicleId', driverVehiclePublicFields);
+
+  if (!offer) return null;
+
+  return buildEnrichedOffer(offer);
+};
+
+const loadEnrichedRequestById = async ({
+  requestId,
+  includeContactInfo = false,
+}) => {
+  const accountFields = includeContactInfo
+    ? accountContactFields
+    : accountPublicFields;
+
+  const requestDoc = await ServiceRequest.findById(requestId)
+    .populate('customerAccountId', accountFields)
+    .populate('acceptedDriverAccountId', accountFields)
+    .populate('acceptedDriverVehicleId', driverVehiclePublicFields)
+    .populate('vehicleTypeId');
+
+  if (!requestDoc) return null;
+
+  const request = requestDoc.toObject();
+
+  if (
+    request.customerAccountId &&
+    typeof request.customerAccountId === 'object'
+  ) {
+    request.customerAccountId = await enrichAccountObject(
+      request.customerAccountId
+    );
+  }
+
+  if (
+    request.acceptedDriverAccountId &&
+    typeof request.acceptedDriverAccountId === 'object'
+  ) {
+    request.acceptedDriverAccountId = await enrichDriverAccountObject(
+      request.acceptedDriverAccountId
+    );
+  }
+
+  return request;
+};
+
+const canDriverViewOpenRequest = async ({ accountId, request }) => {
+  const driverProfile = await ensureDriverCanWork(accountId);
+
+  const vehicleQuery = {
+    accountId,
+    isActive: true,
+    vehicleTypeCode: request.vehicleTypeCode,
+  };
+
+  if (!isDevelopment) {
+    vehicleQuery.isApproved = true;
+    vehicleQuery.reviewStatus = 'approved';
+  }
+
+  const matchingVehicle = await DriverVehicle.exists(vehicleQuery);
+
+  if (!matchingVehicle) {
+    return false;
+  }
+
+  if (
+    driverProfile.currentLat === null ||
+    driverProfile.currentLng === null ||
+    request.pickup?.lat === undefined ||
+    request.pickup?.lng === undefined ||
+    request.pickup?.lat === null ||
+    request.pickup?.lng === null
+  ) {
+    return false;
+  }
+
+  const distanceFromDriverKm = calculateDistanceKm({
+    lat1: driverProfile.currentLat,
+    lng1: driverProfile.currentLng,
+    lat2: request.pickup.lat,
+    lng2: request.pickup.lng,
+  });
+
+  return distanceFromDriverKm <= Number(request.searchRadiusKm || 5);
 };
 
 const getServiceRequestById = asyncHandler(async (req, res) => {
@@ -702,35 +792,69 @@ const getServiceRequestById = asyncHandler(async (req, res) => {
   const isCustomer = baseRequest.customerAccountId.toString() === req.accountId;
   const isAcceptedDriver =
     baseRequest.acceptedDriverAccountId?.toString() === req.accountId;
+  const isDriver = req.roles?.includes('driver');
+  const isAdmin = req.roles?.includes('admin');
 
-  if (!isCustomer && !isAcceptedDriver && !req.roles?.includes('admin')) {
+  const isOpenForDrivers =
+    baseRequest.status === 'pending_offers' ||
+    baseRequest.status === 'negotiating';
+
+  let canDriverViewOpen = false;
+
+  if (
+    !isCustomer &&
+    !isAcceptedDriver &&
+    !isAdmin &&
+    isDriver &&
+    isOpenForDrivers
+  ) {
+    canDriverViewOpen = await canDriverViewOpenRequest({
+      accountId: req.accountId,
+      request: baseRequest,
+    });
+  }
+
+  if (!isCustomer && !isAcceptedDriver && !isAdmin && !canDriverViewOpen) {
     const error = new Error('غير مسموح لك بعرض هذا الطلب');
     error.statusCode = 403;
     throw error;
   }
 
-  const request = await ServiceRequest.findById(baseRequest._id)
-    .populate('customerAccountId', 'name phone email profileImage image photo avatar')
-    .populate('acceptedDriverAccountId', 'name phone email profileImage image photo avatar')
-    .populate('acceptedDriverVehicleId')
-    .populate('vehicleTypeId');
+  const isConfirmedRequest =
+    confirmedStatuses.includes(baseRequest.status) &&
+    !!baseRequest.acceptedDriverAccountId;
 
-  const offers = await ServiceOffer.find({
+  const canSeeContactInfo =
+    isAdmin || (isConfirmedRequest && (isCustomer || isAcceptedDriver));
+
+  const request = await loadEnrichedRequestById({
+    requestId: baseRequest._id,
+    includeContactInfo: canSeeContactInfo,
+  });
+
+  const offerDocs = await ServiceOffer.find({
     serviceRequestId: baseRequest._id,
   })
-    .populate('driverAccountId', 'name phone email profileImage image photo avatar')
-    .populate('driverVehicleId')
+    .populate('driverAccountId', accountPublicFields)
+    .populate('driverVehicleId', driverVehiclePublicFields)
     .sort({
       createdAt: -1,
     });
 
-  const enriched = await attachPeopleAndVehicleInfo(request, offers);
+  const offers = [];
+
+  for (const offerDoc of offerDocs) {
+    const enrichedOffer = await buildEnrichedOffer(offerDoc);
+
+    if (enrichedOffer) {
+      offers.push(enrichedOffer);
+    }
+  }
 
   const acceptedOffer =
-    enriched.offers.find((offer) => {
+    offers.find((offer) => {
       return (
-        offer._id?.toString() ===
-          enriched.request.acceptedOfferId?.toString() ||
+        offer._id?.toString() === request.acceptedOfferId?.toString() ||
         offer.status === 'accepted'
       );
     }) || null;
@@ -739,8 +863,8 @@ const getServiceRequestById = asyncHandler(async (req, res) => {
     res,
     message: 'تم جلب تفاصيل الطلب بنجاح',
     doc: {
-      request: enriched.request,
-      offers: enriched.offers,
+      request,
+      offers,
       acceptedOffer,
     },
   });
@@ -800,11 +924,11 @@ const createDriverOffer = asyncHandler(async (req, res) => {
   }
 
   let offer = await ServiceOffer.findOne({
-  serviceRequestId: request._id,
-  driverAccountId: req.accountId,
-  status: 'pending',
-  sentBy: 'driver',
-});
+    serviceRequestId: request._id,
+    driverAccountId: req.accountId,
+    status: 'pending',
+    sentBy: 'driver',
+  });
 
   if (offer) {
     offer.driverVehicleId = driverVehicle._id;
@@ -826,40 +950,49 @@ const createDriverOffer = asyncHandler(async (req, res) => {
   request.status = 'negotiating';
   await request.save();
 
+  const enrichedOffer = await loadEnrichedOfferById(offer._id);
+  const offerForResponse = enrichedOffer || offer;
+
   safeSocketEmit(() => {
     emitToAccount(request.customerAccountId.toString(), 'offer:new', {
       requestId: request._id,
-      offer,
+      serviceRequestId: request._id,
+      offer: offerForResponse,
+      request,
     });
 
     emitToRequest(request._id.toString(), 'offer:new', {
       requestId: request._id,
-      offer,
+      serviceRequestId: request._id,
+      offer: offerForResponse,
+      request,
     });
 
     getIO().to('admins').emit('admin:offer-created', {
       requestId: request._id,
-      offer,
+      serviceRequestId: request._id,
+      offer: offerForResponse,
+      request,
     });
   });
 
   await safeCreateNotification({
-  accountId: request.customerAccountId,
-  title: 'عرض جديد على طلبك',
-  body: `وصلك عرض جديد بسعر ${offer.offeredPrice} جنيه`,
-  type: 'offer',
-  data: {
-    serviceRequestId: request._id,
-    offerId: offer._id,
-    offeredPrice: offer.offeredPrice,
-  },
-});
+    accountId: request.customerAccountId,
+    title: 'عرض جديد على طلبك',
+    body: `وصلك عرض جديد بسعر ${offer.offeredPrice} جنيه`,
+    type: 'offer',
+    data: {
+      serviceRequestId: request._id,
+      offerId: offer._id,
+      offeredPrice: offer.offeredPrice,
+    },
+  });
 
   return sendSuccess({
     res,
     statusCode: 201,
     message: 'تم إرسال العرض للعميل بنجاح',
-    doc: offer,
+    doc: offerForResponse,
   });
 });
 
@@ -891,11 +1024,14 @@ const acceptOffer = asyncHandler(async (req, res) => {
     error.statusCode = 404;
     throw error;
   }
+
   if (offer.sentBy !== 'driver') {
-  const error = new Error('لا يمكن للعميل قبول عرض مرسل منه، يجب انتظار موافقة السائق');
-  error.statusCode = 400;
-  throw error;
-}
+    const error = new Error(
+      'لا يمكن للعميل قبول عرض مرسل منه، يجب انتظار موافقة السائق'
+    );
+    error.statusCode = 400;
+    throw error;
+  }
 
   const driverProfile = await ensureDriverCanWork(
     offer.driverAccountId.toString()
@@ -958,116 +1094,72 @@ const acceptOffer = asyncHandler(async (req, res) => {
 
   await request.save();
 
+  const acceptedRequestForParties = await loadEnrichedRequestById({
+    requestId: request._id,
+    includeContactInfo: true,
+  });
+
+  const acceptedRequestPublic = await loadEnrichedRequestById({
+    requestId: request._id,
+    includeContactInfo: false,
+  });
+
+  const acceptedOfferForResponse =
+    (await loadEnrichedOfferById(offer._id)) || offer;
+
   safeSocketEmit(() => {
     emitToAccount(offer.driverAccountId.toString(), 'offer:accepted', {
-      request,
-      offer,
+      request: acceptedRequestForParties,
+      offer: acceptedOfferForResponse,
     });
 
     emitToAccount(request.customerAccountId.toString(), 'request:confirmed', {
-      request,
-      offer,
+      request: acceptedRequestForParties,
+      offer: acceptedOfferForResponse,
     });
 
     emitToRequest(request._id.toString(), 'request:confirmed', {
-      request,
-      offer,
+      request: acceptedRequestPublic,
+      offer: acceptedOfferForResponse,
     });
 
     getIO().to('admins').emit('admin:request-confirmed', {
-      request,
-      offer,
+      request: acceptedRequestForParties,
+      offer: acceptedOfferForResponse,
     });
   });
 
   await safeCreateNotification({
-  accountId: request.customerAccountId,
-  title: 'تم تأكيد الطلب',
-  body: `تم قبول العرض وتأكيد الطلب بسعر ${request.finalPrice} جنيه`,
-  type: 'request',
-  data: {
-    serviceRequestId: request._id,
-    offerId: offer._id,
-    finalPrice: request.finalPrice,
-  },
-});
+    accountId: request.customerAccountId,
+    title: 'تم تأكيد الطلب',
+    body: `تم قبول العرض وتأكيد الطلب بسعر ${request.finalPrice} جنيه`,
+    type: 'request',
+    data: {
+      serviceRequestId: request._id,
+      offerId: offer._id,
+      finalPrice: request.finalPrice,
+    },
+  });
 
-await safeCreateNotification({
-  accountId: offer.driverAccountId,
-  title: 'تم قبول عرضك',
-  body: `العميل قبل عرضك بسعر ${request.finalPrice} جنيه`,
-  type: 'offer',
-  data: {
-    serviceRequestId: request._id,
-    offerId: offer._id,
-    finalPrice: request.finalPrice,
-  },
-});
+  await safeCreateNotification({
+    accountId: offer.driverAccountId,
+    title: 'تم قبول عرضك',
+    body: `العميل قبل عرضك بسعر ${request.finalPrice} جنيه`,
+    type: 'offer',
+    data: {
+      serviceRequestId: request._id,
+      offerId: offer._id,
+      finalPrice: request.finalPrice,
+    },
+  });
 
   return sendSuccess({
     res,
     message: 'تم قبول العرض وتأكيد الطلب بنجاح',
     doc: {
-      request,
-      acceptedOffer: offer,
+      request: acceptedRequestForParties,
+      acceptedOffer: acceptedOfferForResponse,
     },
-  });
-});
-
-const rejectOffer = asyncHandler(async (req, res) => {
-  const request = await ensureRequestExists(req.params.id);
-
-  if (request.customerAccountId.toString() !== req.accountId) {
-    const error = new Error('العميل صاحب الطلب فقط يمكنه رفض العرض');
-    error.statusCode = 403;
-    throw error;
-  }
-
-  const { offerId } = req.params;
-
-  const offer = await ServiceOffer.findOne({
-    _id: offerId,
-    serviceRequestId: request._id,
-    status: 'pending',
-  });
-
-  if (!offer) {
-    const error = new Error('العرض غير موجود أو لم يعد متاحًا');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  offer.status = 'rejected';
-  offer.rejectedAt = new Date();
-  await offer.save();
-
-  safeSocketEmit(() => {
-    emitToAccount(offer.driverAccountId.toString(), 'offer:rejected', {
-      requestId: request._id,
-      offer,
-    });
-
-    emitToRequest(request._id.toString(), 'offer:rejected', {
-      requestId: request._id,
-      offer,
-    });
-  });
-
-  await safeCreateNotification({
-  accountId: offer.driverAccountId,
-  title: 'تم رفض العرض',
-  body: 'العميل رفض العرض المرسل منك',
-  type: 'offer',
-  data: {
-    serviceRequestId: request._id,
-    offerId: offer._id,
-  },
-});
-
-  return sendSuccess({
-    res,
-    message: 'تم رفض العرض بنجاح',
-    doc: offer,
   });
 });
 
@@ -1144,20 +1236,29 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
   request.status = 'negotiating';
   await request.save();
 
+  const enrichedCounterOffer = await loadEnrichedOfferById(counterOffer._id);
+  const counterOfferForResponse = enrichedCounterOffer || counterOffer;
+
   safeSocketEmit(() => {
     emitToAccount(parentOffer.driverAccountId.toString(), 'offer:countered', {
       requestId: request._id,
-      offer: counterOffer,
+      serviceRequestId: request._id,
+      offer: counterOfferForResponse,
+      request,
     });
 
     emitToRequest(request._id.toString(), 'offer:countered', {
       requestId: request._id,
-      offer: counterOffer,
+      serviceRequestId: request._id,
+      offer: counterOfferForResponse,
+      request,
     });
 
     getIO().to('admins').emit('admin:offer-countered', {
       requestId: request._id,
-      offer: counterOffer,
+      serviceRequestId: request._id,
+      offer: counterOfferForResponse,
+      request,
     });
   });
 
@@ -1177,7 +1278,7 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
     res,
     statusCode: 201,
     message: 'تم إرسال السعر المضاد للسائق بنجاح',
-    doc: counterOffer,
+    doc: counterOfferForResponse,
   });
 });
 
@@ -1270,25 +1371,38 @@ const acceptCustomerCounterOffer = asyncHandler(async (req, res) => {
 
   await request.save();
 
+  const acceptedRequestForParties = await loadEnrichedRequestById({
+    requestId: request._id,
+    includeContactInfo: true,
+  });
+
+  const acceptedRequestPublic = await loadEnrichedRequestById({
+    requestId: request._id,
+    includeContactInfo: false,
+  });
+
+  const acceptedOfferForResponse =
+    (await loadEnrichedOfferById(offer._id)) || offer;
+
   safeSocketEmit(() => {
     emitToAccount(request.customerAccountId.toString(), 'offer:accepted-by-driver', {
-      request,
-      offer,
+      request: acceptedRequestForParties,
+      offer: acceptedOfferForResponse,
     });
 
     emitToAccount(offer.driverAccountId.toString(), 'request:confirmed', {
-      request,
-      offer,
+      request: acceptedRequestForParties,
+      offer: acceptedOfferForResponse,
     });
 
     emitToRequest(request._id.toString(), 'request:confirmed', {
-      request,
-      offer,
+      request: acceptedRequestPublic,
+      offer: acceptedOfferForResponse,
     });
 
     getIO().to('admins').emit('admin:request-confirmed', {
-      request,
-      offer,
+      request: acceptedRequestForParties,
+      offer: acceptedOfferForResponse,
     });
   });
 
@@ -1320,11 +1434,69 @@ const acceptCustomerCounterOffer = asyncHandler(async (req, res) => {
     res,
     message: 'تم قبول السعر المضاد وتأكيد الطلب بنجاح',
     doc: {
-      request,
-      acceptedOffer: offer,
+      request: acceptedRequestForParties,
+      acceptedOffer: acceptedOfferForResponse,
     },
   });
 });
+
+const rejectOffer = asyncHandler(async (req, res) => {
+  const request = await ensureRequestExists(req.params.id);
+
+  if (request.customerAccountId.toString() !== req.accountId) {
+    const error = new Error('العميل صاحب الطلب فقط يمكنه رفض العرض');
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const { offerId } = req.params;
+
+  const offer = await ServiceOffer.findOne({
+    _id: offerId,
+    serviceRequestId: request._id,
+    status: 'pending',
+  });
+
+  if (!offer) {
+    const error = new Error('العرض غير موجود أو لم يعد متاحًا');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  offer.status = 'rejected';
+  offer.rejectedAt = new Date();
+  await offer.save();
+
+  safeSocketEmit(() => {
+    emitToAccount(offer.driverAccountId.toString(), 'offer:rejected', {
+      requestId: request._id,
+      offer,
+    });
+
+    emitToRequest(request._id.toString(), 'offer:rejected', {
+      requestId: request._id,
+      offer,
+    });
+  });
+
+  await safeCreateNotification({
+  accountId: offer.driverAccountId,
+  title: 'تم رفض العرض',
+  body: 'العميل رفض العرض المرسل منك',
+  type: 'offer',
+  data: {
+    serviceRequestId: request._id,
+    offerId: offer._id,
+  },
+});
+
+  return sendSuccess({
+    res,
+    message: 'تم رفض العرض بنجاح',
+    doc: offer,
+  });
+});
+
 
 const rejectCustomerCounterOffer = asyncHandler(async (req, res) => {
   const request = await ensureRequestExists(req.params.id);
@@ -1404,8 +1576,22 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     'customer_no_show',
   ];
 
+  const terminalStatuses = [
+    'completed',
+    'cancelled_by_customer',
+    'cancelled_by_driver',
+    'driver_no_show',
+    'customer_no_show',
+  ];
+
   if (!allowedStatuses.includes(status)) {
     const error = new Error('حالة الطلب غير صحيحة');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (terminalStatuses.includes(request.status)) {
+    const error = new Error('لا يمكن تحديث طلب منتهي أو ملغي');
     error.statusCode = 400;
     throw error;
   }
@@ -1428,12 +1614,6 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
   ) {
     const error = new Error('السائق المقبول فقط يمكنه تحديث هذه الحالة');
     error.statusCode = 403;
-    throw error;
-  }
-
-  if (request.status === 'completed') {
-    const error = new Error('هذا الطلب مكتمل بالفعل');
-    error.statusCode = 400;
     throw error;
   }
 
@@ -1492,11 +1672,15 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
       await driverProfile.save();
 
       safeSocketEmit(() => {
-        emitToAccount(request.acceptedDriverAccountId.toString(), 'finance:debt-updated', {
-          commissionDebt: driverProfile.commissionDebt,
-          commissionDebtLimit: driverProfile.commissionDebtLimit,
-          isBlockedForDebt: driverProfile.isBlockedForDebt,
-        });
+        emitToAccount(
+          request.acceptedDriverAccountId.toString(),
+          'finance:debt-updated',
+          {
+            commissionDebt: driverProfile.commissionDebt,
+            commissionDebtLimit: driverProfile.commissionDebtLimit,
+            isBlockedForDebt: driverProfile.isBlockedForDebt,
+          }
+        );
       });
     }
   }
@@ -1563,14 +1747,24 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
 
   await request.save();
 
+  const requestForParties = await loadEnrichedRequestById({
+    requestId: request._id,
+    includeContactInfo: !!request.acceptedDriverAccountId,
+  });
+
+  const requestPublic = await loadEnrichedRequestById({
+    requestId: request._id,
+    includeContactInfo: false,
+  });
+
   safeSocketEmit(() => {
     emitToRequest(request._id.toString(), 'request:status-changed', {
-      request,
+      request: requestPublic,
       status: request.status,
     });
 
     emitToAccount(request.customerAccountId.toString(), 'request:status-changed', {
-      request,
+      request: requestForParties,
       status: request.status,
     });
 
@@ -1579,49 +1773,50 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
         request.acceptedDriverAccountId.toString(),
         'request:status-changed',
         {
-          request,
+          request: requestForParties,
           status: request.status,
         }
       );
     }
 
     getIO().to('admins').emit('admin:request-status-changed', {
-      request,
+      request: requestForParties,
       status: request.status,
     });
   });
- 
+
   const statusNotifications = buildStatusNotifications(request);
 
-if (statusNotifications?.customer) {
-  await safeCreateNotification({
-    accountId: request.customerAccountId,
-    title: statusNotifications.customer.title,
-    body: statusNotifications.customer.body,
-    type: 'request',
-    data: {
-      serviceRequestId: request._id,
-      status: request.status,
-    },
-  });
-}
+  if (statusNotifications?.customer) {
+    await safeCreateNotification({
+      accountId: request.customerAccountId,
+      title: statusNotifications.customer.title,
+      body: statusNotifications.customer.body,
+      type: 'request',
+      data: {
+        serviceRequestId: request._id,
+        status: request.status,
+      },
+    });
+  }
 
-if (statusNotifications?.driver && request.acceptedDriverAccountId) {
-  await safeCreateNotification({
-    accountId: request.acceptedDriverAccountId,
-    title: statusNotifications.driver.title,
-    body: statusNotifications.driver.body,
-    type: 'request',
-    data: {
-      serviceRequestId: request._id,
-      status: request.status,
-    },
-  });
-}
+  if (statusNotifications?.driver && request.acceptedDriverAccountId) {
+    await safeCreateNotification({
+      accountId: request.acceptedDriverAccountId,
+      title: statusNotifications.driver.title,
+      body: statusNotifications.driver.body,
+      type: 'request',
+      data: {
+        serviceRequestId: request._id,
+        status: request.status,
+      },
+    });
+  }
+
   return sendSuccess({
     res,
     message: 'تم تحديث حالة الطلب بنجاح',
-    doc: request,
+    doc: requestForParties,
   });
 });
 

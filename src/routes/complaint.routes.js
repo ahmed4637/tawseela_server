@@ -53,14 +53,17 @@ router.post(
       .withMessage('وصف الشكوى طويل جدًا'),
 
     body('images')
-      .optional()
-      .isArray()
-      .withMessage('صور الشكوى يجب أن تكون قائمة'),
+  .optional()
+  .isArray({ max: 5 })
+  .withMessage('يمكن رفع 5 صور كحد أقصى للشكوى'),
 
-    body('images.*')
-      .optional()
-      .isString()
-      .withMessage('رابط الصورة غير صحيح'),
+body('images.*')
+  .optional()
+  .trim()
+  .isString()
+  .withMessage('رابط الصورة غير صحيح')
+  .isLength({ max: 300 })
+  .withMessage('رابط الصورة طويل جدًا'),
   ],
   validateRequest,
   createComplaint

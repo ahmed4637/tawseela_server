@@ -7,9 +7,9 @@ const allowedFolders = [
   'profiles',
   'vehicles',
   'licenses',
+  'complaints',
   'general',
 ];
-
 const allowedMimeTypes = [
   'image/jpeg',
   'image/jpg',

@@ -5,6 +5,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 const { createNotification } = require('../services/notification.service');
 
+
 const createComplaint = asyncHandler(async (req, res) => {
   const {
     serviceRequestId,
@@ -13,6 +14,17 @@ const createComplaint = asyncHandler(async (req, res) => {
     description,
     images = [],
   } = req.body;
+
+  const cleanImages = Array.isArray(images)
+    ? images
+        .map((item) => item.toString().trim())
+        .filter((item) => item.length > 0)
+        .slice(0, 5)
+    : [];
+
+  const cleanCategory = category?.toString().trim() || 'other';
+  const cleanTitle = title?.toString().trim();
+  const cleanDescription = description?.toString().trim();
 
   const request = await ServiceRequest.findById(serviceRequestId);
 
@@ -42,15 +54,28 @@ const createComplaint = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  const existingOpenComplaint = await Complaint.findOne({
+    serviceRequestId: request._id,
+    fromAccountId: req.accountId,
+    againstAccountId,
+    status: { $in: ['open', 'under_review'] },
+  });
+
+  if (existingOpenComplaint) {
+    const error = new Error('لديك شكوى مفتوحة بالفعل على هذا الطلب');
+    error.statusCode = 409;
+    throw error;
+  }
+
   const doc = await Complaint.create({
     serviceRequestId: request._id,
     fromAccountId: req.accountId,
     againstAccountId,
     fromRole: isCustomer ? 'customer' : 'driver',
-    category: category || 'other',
-    title,
-    description,
-    images,
+    category: cleanCategory,
+    title: cleanTitle,
+    description: cleanDescription,
+    images: cleanImages,
     status: 'open',
   });
 
@@ -76,7 +101,6 @@ const createComplaint = asyncHandler(async (req, res) => {
     doc,
   });
 });
-
 const getMyComplaints = asyncHandler(async (req, res) => {
   const docs = await Complaint.find({
     fromAccountId: req.accountId,
@@ -169,10 +193,15 @@ const updateComplaintByAdmin = asyncHandler(async (req, res) => {
     doc.adminNote = adminNote;
   }
 
-  if (['resolved', 'rejected'].includes(doc.status)) {
-    doc.resolvedByAdminId = req.accountId;
-    doc.resolvedAt = new Date();
-  }
+ if (['resolved', 'rejected'].includes(doc.status)) {
+  doc.resolvedByAdminId = req.accountId;
+  doc.resolvedAt = new Date();
+}
+
+if (['open', 'under_review'].includes(doc.status)) {
+  doc.resolvedByAdminId = null;
+  doc.resolvedAt = null;
+}
 
   await doc.save();
 
