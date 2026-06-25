@@ -484,9 +484,26 @@ const getMyServiceRequests = asyncHandler(async (req, res) => {
       ? { acceptedDriverAccountId: req.accountId }
       : { customerAccountId: req.accountId };
 
-  const docs = await ServiceRequest.find(query).sort({
-    createdAt: -1,
-  });
+  const baseDocs = await ServiceRequest.find(query)
+    .sort({ createdAt: -1 })
+    .select('_id status acceptedDriverAccountId customerAccountId');
+
+  const docs = [];
+
+  for (const item of baseDocs) {
+    const includeContactInfo =
+      confirmedStatuses.includes(item.status) &&
+      !!item.acceptedDriverAccountId;
+
+    const enriched = await loadEnrichedRequestById({
+      requestId: item._id,
+      includeContactInfo,
+    });
+
+    if (enriched) {
+      docs.push(enriched);
+    }
+  }
 
   return sendSuccess({
     res,
