@@ -1,25 +1,24 @@
+const { Server } = require("socket.io");
+const jwt = require("jsonwebtoken");
+const mongoose = require("mongoose");
 
-const { Server } = require('socket.io');
-const jwt = require('jsonwebtoken');
-const mongoose = require('mongoose');
-
-const Account = require('../models/account.model');
-const DriverProfile = require('../models/driverProfile.model');
-const DriverVehicle = require('../models/driverVehicle.model');
-const ServiceRequest = require('../models/serviceRequest.model');
+const Account = require("../models/account.model");
+const DriverProfile = require("../models/driverProfile.model");
+const DriverVehicle = require("../models/driverVehicle.model");
+const ServiceRequest = require("../models/serviceRequest.model");
 
 let ioInstance = null;
 
-const isDevelopment = process.env.NODE_ENV === 'development';
+const isDevelopment = process.env.NODE_ENV === "development";
 
 const getFirstHeaderValue = (value) => {
-  if (!value) return '';
+  if (!value) return "";
 
   if (Array.isArray(value)) {
-    return value[0]?.toString().split(',')[0].trim() || '';
+    return value[0]?.toString().split(",")[0].trim() || "";
   }
 
-  return value.toString().split(',')[0].trim();
+  return value.toString().split(",")[0].trim();
 };
 
 const getSocketToken = (socket) => {
@@ -29,19 +28,19 @@ const getSocketToken = (socket) => {
     getFirstHeaderValue(socket.handshake.headers?.authorization) ||
     getFirstHeaderValue(socket.handshake.headers?.Authorization);
 
-  return (authToken || queryToken || headerToken || '')
+  return (authToken || queryToken || headerToken || "")
     .toString()
-    .replace(/^Bearer\s+/i, '')
+    .replace(/^Bearer\s+/i, "")
     .trim();
 };
 
 const isValidObjectId = (value) => {
-  return mongoose.Types.ObjectId.isValid(value?.toString() || '');
+  return mongoose.Types.ObjectId.isValid(value?.toString() || "");
 };
 
 const getIO = () => {
   if (!ioInstance) {
-    throw new Error('Socket.io لم يتم تشغيله بعد');
+    throw new Error("Socket.io لم يتم تشغيله بعد");
   }
 
   return ioInstance;
@@ -76,20 +75,20 @@ const authenticateSocket = async (socket, next) => {
     const cleanToken = getSocketToken(socket);
 
     if (!cleanToken) {
-      return next(new Error('Token مطلوب للاتصال'));
+      return next(new Error("Token مطلوب للاتصال"));
     }
 
     const decoded = jwt.verify(cleanToken, process.env.JWT_SECRET);
     const accountId = decoded.accountId || decoded.userId;
 
     if (!accountId) {
-      return next(new Error('Token غير صحيح'));
+      return next(new Error("Token غير صحيح"));
     }
 
     const account = await Account.findById(accountId);
 
     if (!account || !account.isActive) {
-      return next(new Error('الحساب غير موجود أو غير مفعل'));
+      return next(new Error("الحساب غير موجود أو غير مفعل"));
     }
 
     socket.account = account;
@@ -99,7 +98,7 @@ const authenticateSocket = async (socket, next) => {
 
     return next();
   } catch (error) {
-    return next(new Error('غير مصرح بالاتصال'));
+    return next(new Error("غير مصرح بالاتصال"));
   }
 };
 
@@ -107,14 +106,14 @@ const clearDriverVehicleRooms = (socket) => {
   const rooms = Array.from(socket.rooms);
 
   for (const room of rooms) {
-    if (room.startsWith('vehicle:')) {
+    if (room.startsWith("vehicle:")) {
       socket.leave(room);
     }
   }
 };
 
 const joinDriverVehicleRooms = async (socket) => {
-  if (!socket.roles.includes('driver')) {
+  if (!socket.roles.includes("driver")) {
     return [];
   }
 
@@ -127,16 +126,14 @@ const joinDriverVehicleRooms = async (socket) => {
 
   if (!isDevelopment) {
     vehicleQuery.isApproved = true;
-    vehicleQuery.reviewStatus = 'approved';
+    vehicleQuery.reviewStatus = "approved";
   }
 
   const driverVehicles = await DriverVehicle.find(vehicleQuery);
 
   const vehicleCodes = [
     ...new Set(
-      driverVehicles
-        .map((vehicle) => vehicle.vehicleTypeCode)
-        .filter(Boolean)
+      driverVehicles.map((vehicle) => vehicle.vehicleTypeCode).filter(Boolean),
     ),
   ];
 
@@ -163,7 +160,7 @@ const canJoinRequestRoom = async ({ socket, requestId }) => {
   const isAcceptedDriver =
     request.acceptedDriverAccountId?.toString() === socket.accountId;
 
-  const isAdmin = socket.roles.includes('admin');
+  const isAdmin = socket.roles.includes("admin");
 
   return isCustomer || isAcceptedDriver || isAdmin;
 };
@@ -171,57 +168,57 @@ const canJoinRequestRoom = async ({ socket, requestId }) => {
 const initSocketServer = (httpServer) => {
   ioInstance = new Server(httpServer, {
     cors: {
-      origin: '*',
-      methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
+      origin: "*",
+      methods: ["GET", "POST", "PATCH", "PUT", "DELETE"],
     },
   });
 
   ioInstance.use(authenticateSocket);
 
-  ioInstance.on('connection', async (socket) => {
+  ioInstance.on("connection", async (socket) => {
     console.log(`Socket connected: ${socket.accountId}`);
 
     let lastDriverLocationDbSaveAt = 0;
 
     socket.join(getAccountRoom(socket.accountId));
 
-    if (socket.roles.includes('admin')) {
-      socket.join('admins');
+    if (socket.roles.includes("admin")) {
+      socket.join("admins");
     }
 
-    if (socket.roles.includes('driver')) {
-      socket.join('drivers');
+    if (socket.roles.includes("driver")) {
+      socket.join("drivers");
 
       const driverProfile = await DriverProfile.findOne({
         accountId: socket.accountId,
       });
 
       if (driverProfile?.isOnline) {
-        socket.join('online_drivers');
+        socket.join("online_drivers");
         await joinDriverVehicleRooms(socket);
       }
     }
 
-    socket.emit('socket:connected', {
+    socket.emit("socket:connected", {
       success: true,
-      message: 'تم الاتصال باللايف بنجاح',
+      message: "تم الاتصال باللايف بنجاح",
       accountId: socket.accountId,
       roles: socket.roles,
     });
 
-    socket.on('request:join', async (payload = {}, callback) => {
+    socket.on("request:join", async (payload = {}, callback) => {
       try {
         const requestId = (
           payload.requestId ||
           payload.serviceRequestId ||
           payload.rideId ||
-          ''
+          ""
         )
           .toString()
           .trim();
 
         if (!requestId) {
-          throw new Error('رقم الطلب مطلوب');
+          throw new Error("رقم الطلب مطلوب");
         }
 
         const allowed = await canJoinRequestRoom({
@@ -230,7 +227,7 @@ const initSocketServer = (httpServer) => {
         });
 
         if (!allowed) {
-          throw new Error('غير مسموح لك بمتابعة هذا الطلب');
+          throw new Error("غير مسموح لك بمتابعة هذا الطلب");
         }
 
         socket.join(getRequestRoom(requestId));
@@ -238,7 +235,7 @@ const initSocketServer = (httpServer) => {
         if (callback) {
           callback({
             success: true,
-            message: 'تم الدخول إلى غرفة الطلب',
+            message: "تم الدخول إلى غرفة الطلب",
           });
         }
       } catch (error) {
@@ -251,12 +248,12 @@ const initSocketServer = (httpServer) => {
       }
     });
 
-    socket.on('request:leave', (payload = {}, callback) => {
+    socket.on("request:leave", (payload = {}, callback) => {
       const requestId = (
         payload.requestId ||
         payload.serviceRequestId ||
         payload.rideId ||
-        ''
+        ""
       )
         .toString()
         .trim();
@@ -268,15 +265,15 @@ const initSocketServer = (httpServer) => {
       if (callback) {
         callback({
           success: true,
-          message: 'تم الخروج من غرفة الطلب',
+          message: "تم الخروج من غرفة الطلب",
         });
       }
     });
 
-    socket.on('driver:go-online', async (payload = {}, callback) => {
+    socket.on("driver:go-online", async (payload = {}, callback) => {
       try {
-        if (!socket.roles.includes('driver')) {
-          throw new Error('هذا الإجراء متاح للسائق فقط');
+        if (!socket.roles.includes("driver")) {
+          throw new Error("هذا الإجراء متاح للسائق فقط");
         }
 
         const { lat, lng } = payload;
@@ -289,7 +286,7 @@ const initSocketServer = (httpServer) => {
           hasLocation &&
           (!Number.isFinite(latNumber) || !Number.isFinite(lngNumber))
         ) {
-          throw new Error('الموقع غير صحيح');
+          throw new Error("الموقع غير صحيح");
         }
 
         const driverProfile = await DriverProfile.findOne({
@@ -297,7 +294,7 @@ const initSocketServer = (httpServer) => {
         });
 
         if (!driverProfile) {
-          throw new Error('ملف السائق غير موجود');
+          throw new Error("ملف السائق غير موجود");
         }
 
         driverProfile.refreshDebtBlockStatus();
@@ -305,7 +302,7 @@ const initSocketServer = (httpServer) => {
         if (driverProfile.isBlockedForDebt) {
           throw new Error(
             driverProfile.blockedReason ||
-              'تم إيقاف استقبال الرحلات بسبب مستحقات التطبيق'
+              "تم إيقاف استقبال الرحلات بسبب مستحقات التطبيق",
           );
         }
 
@@ -316,27 +313,27 @@ const initSocketServer = (httpServer) => {
           driverProfile.currentLat = latNumber;
           driverProfile.currentLng = lngNumber;
           driverProfile.currentLocation = {
-            type: 'Point',
+            type: "Point",
             coordinates: [lngNumber, latNumber],
           };
         }
 
         await driverProfile.save();
 
-        socket.join('online_drivers');
+        socket.join("online_drivers");
 
         const vehicleCodes = await joinDriverVehicleRooms(socket);
 
         if (callback) {
           callback({
             success: true,
-            message: 'السائق أصبح Online',
+            message: "السائق أصبح Online",
             driverProfile,
             vehicleCodes,
           });
         }
 
-        ioInstance.to('admins').emit('driver:online-status-changed', {
+        ioInstance.to("admins").emit("driver:online-status-changed", {
           accountId: socket.accountId,
           isOnline: true,
           currentLat: driverProfile.currentLat,
@@ -353,10 +350,10 @@ const initSocketServer = (httpServer) => {
       }
     });
 
-    socket.on('driver:go-offline', async (payload = {}, callback) => {
+    socket.on("driver:go-offline", async (payload = {}, callback) => {
       try {
-        if (!socket.roles.includes('driver')) {
-          throw new Error('هذا الإجراء متاح للسائق فقط');
+        if (!socket.roles.includes("driver")) {
+          throw new Error("هذا الإجراء متاح للسائق فقط");
         }
 
         const driverProfile = await DriverProfile.findOne({
@@ -364,26 +361,29 @@ const initSocketServer = (httpServer) => {
         });
 
         if (!driverProfile) {
-          throw new Error('ملف السائق غير موجود');
+          throw new Error("ملف السائق غير موجود");
         }
 
         driverProfile.isOnline = false;
         await driverProfile.save();
 
-        socket.leave('online_drivers');
+        socket.leave("online_drivers");
         clearDriverVehicleRooms(socket);
 
         if (callback) {
           callback({
             success: true,
-            message: 'السائق أصبح Offline',
+            message: "السائق أصبح Offline",
             driverProfile,
           });
         }
 
-        ioInstance.to('admins').emit('driver:online-status-changed', {
+        ioInstance.to("admins").emit("driver:online-status-changed", {
           accountId: socket.accountId,
           isOnline: false,
+          currentLat: driverProfile.currentLat,
+          currentLng: driverProfile.currentLng,
+          vehicleCodes: [],
         });
       } catch (error) {
         if (callback) {
@@ -395,24 +395,24 @@ const initSocketServer = (httpServer) => {
       }
     });
 
-    socket.on('driver:location', async (payload = {}, callback) => {
+    socket.on("driver:location", async (payload = {}, callback) => {
       try {
-        if (!socket.roles.includes('driver')) {
-          throw new Error('هذا الإجراء متاح للسائق فقط');
+        if (!socket.roles.includes("driver")) {
+          throw new Error("هذا الإجراء متاح للسائق فقط");
         }
 
         const lat = Number(payload.lat ?? payload.latitude);
         const lng = Number(payload.lng ?? payload.longitude);
 
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-          throw new Error('الموقع مطلوب');
+          throw new Error("الموقع مطلوب");
         }
 
         const requestIdFromPayload = (
           payload.requestId ||
           payload.serviceRequestId ||
           payload.rideId ||
-          ''
+          ""
         )
           .toString()
           .trim();
@@ -422,26 +422,26 @@ const initSocketServer = (httpServer) => {
         });
 
         if (!driverProfile) {
-          throw new Error('ملف السائق غير موجود');
+          throw new Error("ملف السائق غير موجود");
         }
 
         let activeRequestId =
-          driverProfile.activeServiceRequestId?.toString() || '';
+          driverProfile.activeServiceRequestId?.toString() || "";
 
         if (!activeRequestId && requestIdFromPayload) {
           if (!isValidObjectId(requestIdFromPayload)) {
-            throw new Error('رقم الطلب غير صحيح');
+            throw new Error("رقم الطلب غير صحيح");
           }
 
           const request = await ServiceRequest.findById(requestIdFromPayload)
-            .select('acceptedDriverAccountId status')
+            .select("acceptedDriverAccountId status")
             .lean();
 
           const isAcceptedDriver =
             request?.acceptedDriverAccountId?.toString() === socket.accountId;
 
           if (!request || !isAcceptedDriver) {
-            throw new Error('غير مسموح بتحديث موقع هذا الطلب');
+            throw new Error("غير مسموح بتحديث موقع هذا الطلب");
           }
 
           activeRequestId = requestIdFromPayload;
@@ -454,7 +454,7 @@ const initSocketServer = (httpServer) => {
           driverProfile.currentLat = lat;
           driverProfile.currentLng = lng;
           driverProfile.currentLocation = {
-            type: 'Point',
+            type: "Point",
             coordinates: [lng, lat],
           };
 
@@ -478,12 +478,12 @@ const initSocketServer = (httpServer) => {
         if (activeRequestId) {
           emitToRequest(
             activeRequestId,
-            'driver:location-updated',
-            locationPayload
+            "driver:location-updated",
+            locationPayload,
           );
         }
 
-        ioInstance.to('admins').emit('driver:location-updated', {
+        ioInstance.to("admins").emit("driver:location-updated", {
           ...locationPayload,
           activeServiceRequestId: activeRequestId,
         });
@@ -491,7 +491,7 @@ const initSocketServer = (httpServer) => {
         if (callback) {
           callback({
             success: true,
-            message: 'تم تحديث موقع السائق',
+            message: "تم تحديث موقع السائق",
           });
         }
       } catch (error) {
@@ -504,7 +504,7 @@ const initSocketServer = (httpServer) => {
       }
     });
 
-    socket.on('disconnect', () => {
+    socket.on("disconnect", () => {
       console.log(`Socket disconnected: ${socket.accountId}`);
     });
   });
