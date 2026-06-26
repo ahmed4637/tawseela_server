@@ -1808,83 +1808,75 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     );
   }
 
-  await request.save();
+ await request.save();
 
   const requestForParties = await loadEnrichedRequestById({
     requestId: request._id,
     includeContactInfo: !!request.acceptedDriverAccountId,
   });
 
-  const requestPublic = await loadEnrichedRequestById({
-    requestId: request._id,
-    includeContactInfo: false,
-  });
-
   safeSocketEmit(() => {
-    emitToRequest(request._id.toString(), "request:status-changed", {
-      request: requestPublic,
+    const payload = {
+      request: requestForParties,
       status: request.status,
-    });
+    };
+
+    emitToRequest(request._id.toString(), "request:status-changed", payload);
 
     emitToAccount(
       request.customerAccountId.toString(),
       "request:status-changed",
-      {
-        request: requestForParties,
-        status: request.status,
-      },
+      payload,
     );
 
     if (request.acceptedDriverAccountId) {
       emitToAccount(
         request.acceptedDriverAccountId.toString(),
         "request:status-changed",
-        {
-          request: requestForParties,
-          status: request.status,
-        },
+        payload,
       );
     }
 
-    getIO().to("admins").emit("admin:request-status-changed", {
-      request: requestForParties,
-      status: request.status,
-    });
+    getIO().to("admins").emit("admin:request-status-changed", payload);
   });
 
-  const statusNotifications = buildStatusNotifications(request);
-
-  if (statusNotifications?.customer) {
-    await safeCreateNotification({
-      accountId: request.customerAccountId,
-      title: statusNotifications.customer.title,
-      body: statusNotifications.customer.body,
-      type: "request",
-      data: {
-        serviceRequestId: request._id,
-        status: request.status,
-      },
-    });
-  }
-
-  if (statusNotifications?.driver && request.acceptedDriverAccountId) {
-    await safeCreateNotification({
-      accountId: request.acceptedDriverAccountId,
-      title: statusNotifications.driver.title,
-      body: statusNotifications.driver.body,
-      type: "request",
-      data: {
-        serviceRequestId: request._id,
-        status: request.status,
-      },
-    });
-  }
-
-  return sendSuccess({
+  const responsePayload = {
     res,
     message: "تم تحديث حالة الطلب بنجاح",
     doc: requestForParties,
+  };
+
+  const statusNotifications = buildStatusNotifications(request);
+
+  setImmediate(() => {
+    if (statusNotifications?.customer) {
+      safeCreateNotification({
+        accountId: request.customerAccountId,
+        title: statusNotifications.customer.title,
+        body: statusNotifications.customer.body,
+        type: "request",
+        data: {
+          serviceRequestId: request._id,
+          status: request.status,
+        },
+      });
+    }
+
+    if (statusNotifications?.driver && request.acceptedDriverAccountId) {
+      safeCreateNotification({
+        accountId: request.acceptedDriverAccountId,
+        title: statusNotifications.driver.title,
+        body: statusNotifications.driver.body,
+        type: "request",
+        data: {
+          serviceRequestId: request._id,
+          status: request.status,
+        },
+      });
+    }
   });
+
+  return sendSuccess(responsePayload);
 });
 
 module.exports = {
