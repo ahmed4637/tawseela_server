@@ -1,10 +1,11 @@
 const express = require('express');
-const { body } = require('express-validator');
+const { body, param, query } = require('express-validator');
 
 const {
   createRating,
   getMyGivenRatings,
   getMyReceivedRatings,
+  getAccountRatings
 } = require('../controllers/rating.controller');
 
 const validateRequest = require('../middlewares/validateRequest');
@@ -37,6 +38,32 @@ router.post(
   ],
   validateRequest,
   createRating
+);
+
+router.get(
+  '/account/:accountId',
+  [
+    param('accountId')
+      .isMongoId()
+      .withMessage('رقم الحساب غير صحيح'),
+
+    query('role')
+      .optional({ checkFalsy: true })
+      .isIn(['customer', 'driver'])
+      .withMessage('نوع الحساب غير صحيح'),
+
+    query('page')
+      .optional({ checkFalsy: true })
+      .isInt({ min: 1 })
+      .withMessage('رقم الصفحة غير صحيح'),
+
+    query('limit')
+      .optional({ checkFalsy: true })
+      .isInt({ min: 1, max: 50 })
+      .withMessage('عدد النتائج غير صحيح'),
+  ],
+  validateRequest,
+  getAccountRatings
 );
 
 router.get('/given', getMyGivenRatings);

@@ -1,7 +1,7 @@
 const Rating = require('../models/rating.model');
 const ServiceRequest = require('../models/serviceRequest.model');
 const DriverProfile = require('../models/driverProfile.model');
-
+const mongoose = require('mongoose');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 
@@ -142,8 +142,86 @@ const getMyReceivedRatings = asyncHandler(async (req, res) => {
   });
 });
 
+const getAccountRatings = asyncHandler(async (req, res) => {
+  const { accountId } = req.params;
+
+  const role = req.query.role?.toString().trim() || '';
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
+  const skip = (page - 1) * limit;
+
+  if (!mongoose.Types.ObjectId.isValid(accountId)) {
+    const error = new Error('رقم الحساب غير صحيح');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (role && !['customer', 'driver'].includes(role)) {
+    const error = new Error('نوع الحساب غير صحيح');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const query = {
+    toAccountId: new mongoose.Types.ObjectId(accountId),
+  };
+
+  if (role) {
+    query.toRole = role;
+  }
+
+  const [statsResult, total, ratingDocs] = await Promise.all([
+    Rating.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: '$toAccountId',
+          ratingAverage: { $avg: '$stars' },
+          ratingCount: { $sum: 1 },
+        },
+      },
+    ]),
+
+    Rating.countDocuments(query),
+
+    Rating.find(query)
+      .populate('fromAccountId', 'name profileImage image photo avatar')
+      .populate('serviceRequestId', 'serviceType createdAt')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+  ]);
+
+  const docs = ratingDocs.map((item) => item.toObject());
+
+  const stats = statsResult[0];
+
+  const latestReview =
+    docs.find((item) => item.comment?.toString().trim().isNotEmpty) || null;
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب تقييمات الحساب بنجاح',
+    doc: {
+      summary: {
+        ratingAverage: stats
+          ? Math.round((stats.ratingAverage || 0) * 10) / 10
+          : 0,
+        ratingCount: stats ? stats.ratingCount : 0,
+        page,
+        limit,
+        total,
+        hasMore: skip + docs.length < total,
+      },
+      latestReview,
+    },
+    docs,
+  });
+});
+
 module.exports = {
   createRating,
   getMyGivenRatings,
   getMyReceivedRatings,
+  getAccountRatings,
 };
