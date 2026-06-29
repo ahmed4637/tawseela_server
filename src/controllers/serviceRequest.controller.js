@@ -262,6 +262,81 @@ const calculateEstimatedPrice = ({ vehicle, distanceKm }) => {
   return roundMoney(Math.max(rawPrice, Number(vehicle.minPrice || 0)));
 };
 
+const calculateFinalFareOnCompletion = ({ request, vehicle, body = {} }) => {
+  const agreedPrice = roundMoney(
+    request.finalPrice || request.customerOfferedPrice || 0,
+  );
+
+  const originalDistanceKm = roundMoney(request.distanceKm || 0);
+
+  const actualDistanceInput =
+    body.actualDistanceKm ??
+    body.finalDistanceKm ??
+    body.completedDistanceKm ??
+    null;
+
+  const actualDistanceKm = roundMoney(
+    actualDistanceInput !== null && actualDistanceInput !== undefined
+      ? Math.max(Number(actualDistanceInput) || 0, originalDistanceKm)
+      : originalDistanceKm,
+  );
+
+  const extraDistanceKm = roundMoney(
+    Math.max(actualDistanceKm - originalDistanceKm, 0),
+  );
+
+  const pricePerExtraKm = roundMoney(
+    Number(vehicle?.pricePerKm || vehicle?.extraPricePerKm || 0),
+  );
+
+  const extraDistanceFare = roundMoney(extraDistanceKm * pricePerExtraKm);
+
+  const waitingMinutes = Math.max(
+    Number(body.waitingMinutes ?? body.waitMinutes ?? 0) || 0,
+    0,
+  );
+
+  const waitingPricePerMinute = roundMoney(
+    Number(
+      vehicle?.waitingPricePerMinute ||
+        vehicle?.pricePerWaitingMinute ||
+        vehicle?.waitingMinutePrice ||
+        0,
+    ),
+  );
+
+  const waitingFare = roundMoney(waitingMinutes * waitingPricePerMinute);
+
+  const manualAdjustment = roundMoney(
+    Number(body.manualAdjustment ?? body.extraFare ?? 0) || 0,
+  );
+
+  const totalIncrease = roundMoney(
+    Math.max(extraDistanceFare + waitingFare + manualAdjustment, 0),
+  );
+
+  const finalPrice = roundMoney(agreedPrice + totalIncrease);
+
+  return {
+    finalPrice,
+    details: {
+      agreedPrice,
+      originalDistanceKm,
+      actualDistanceKm,
+      extraDistanceKm,
+      pricePerExtraKm,
+      extraDistanceFare,
+      waitingMinutes,
+      waitingPricePerMinute,
+      waitingFare,
+      manualAdjustment,
+      totalIncrease,
+      calculatedAt: new Date(),
+      note: body.finalFareNote || "",
+    },
+  };
+};
+
 const ensureRequestExists = async (requestId) => {
   if (!isValidObjectId(requestId)) {
     const error = new Error("رقم الطلب غير صحيح");
@@ -457,12 +532,10 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     nearbyDriverAccountIds.forEach((driverAccountId) => {
       emitToAccount(driverAccountId, "request:new", requestPayload);
     });
-    getIO()
-      .to("admins")
-      .emit("admin:request-created", {
-        request: doc,
-        nearbyDriversCount: nearbyDriverAccountIds.length,
-      });
+    getIO().to("admins").emit("admin:request-created", {
+      request: doc,
+      nearbyDriversCount: nearbyDriverAccountIds.length,
+    });
   });
 
   await safeCreateNotification({
@@ -1618,7 +1691,18 @@ const rejectCustomerCounterOffer = asyncHandler(async (req, res) => {
 const updateServiceRequestStatus = asyncHandler(async (req, res) => {
   const request = await ensureRequestExists(req.params.id);
 
-  const { status, cancellationReason } = req.body;
+  const {
+    status,
+    cancellationReason,
+    actualDistanceKm,
+    finalDistanceKm,
+    completedDistanceKm,
+    waitingMinutes,
+    waitMinutes,
+    manualAdjustment,
+    extraFare,
+    finalFareNote,
+  } = req.body;
 
   const isCustomer = request.customerAccountId.toString() === req.accountId;
   const isAcceptedDriver =
@@ -1692,6 +1776,37 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
   if (status === "completed") {
     request.status = "completed";
     request.completedAt = new Date();
+
+    const vehicle = await Vehicle.findOne({
+      code: request.vehicleTypeCode,
+    });
+
+    const commissionPercent = getCommissionPercent(
+      vehicle,
+      request.serviceType,
+    );
+
+    const finalFare = calculateFinalFareOnCompletion({
+      request,
+      vehicle,
+      body: {
+        actualDistanceKm,
+        finalDistanceKm,
+        completedDistanceKm,
+        waitingMinutes,
+        waitMinutes,
+        manualAdjustment,
+        extraFare,
+        finalFareNote,
+      },
+    });
+
+    request.finalPrice = finalFare.finalPrice;
+    request.finalFareDetails = finalFare.details;
+    request.commissionPercent = commissionPercent;
+    request.commissionAmount = roundMoney(
+      (request.finalPrice * commissionPercent) / 100,
+    );
 
     const existingCommission = await CommissionTransaction.findOne({
       serviceRequestId: request._id,
@@ -1808,7 +1923,7 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     );
   }
 
- await request.save();
+  await request.save();
 
   const requestForParties = await loadEnrichedRequestById({
     requestId: request._id,
