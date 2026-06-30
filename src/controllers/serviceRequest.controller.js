@@ -1048,6 +1048,28 @@ const createDriverOffer = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  const pendingCustomerCounter = await ServiceOffer.findOne({
+    serviceRequestId: request._id,
+    driverAccountId: req.accountId,
+    status: "pending",
+    sentBy: "customer",
+  }).sort({ createdAt: -1 });
+
+  if (pendingCustomerCounter) {
+    await ServiceOffer.updateMany(
+      {
+        serviceRequestId: request._id,
+        driverAccountId: req.accountId,
+        status: "pending",
+        sentBy: "customer",
+      },
+      {
+        status: "cancelled",
+        expiredAt: new Date(),
+      },
+    );
+  }
+
   let offer = await ServiceOffer.findOne({
     serviceRequestId: request._id,
     driverAccountId: req.accountId,
@@ -1059,6 +1081,7 @@ const createDriverOffer = asyncHandler(async (req, res) => {
     offer.driverVehicleId = driverVehicle._id;
     offer.offeredPrice = roundMoney(price);
     offer.message = message || "";
+    offer.parentOfferId = pendingCustomerCounter?._id || offer.parentOfferId;
     await offer.save();
   } else {
     offer = await ServiceOffer.create({
@@ -1069,6 +1092,7 @@ const createDriverOffer = asyncHandler(async (req, res) => {
       message: message || "",
       status: "pending",
       sentBy: "driver",
+      parentOfferId: pendingCustomerCounter?._id || null,
     });
   }
 
