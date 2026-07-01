@@ -162,7 +162,63 @@ const canJoinRequestRoom = async ({ socket, requestId }) => {
 
   const isAdmin = socket.roles.includes("admin");
 
-  return isCustomer || isAcceptedDriver || isAdmin;
+  if (isCustomer || isAcceptedDriver || isAdmin) {
+    return true;
+  }
+
+  const isOpenForDrivers =
+    socket.roles.includes("driver") &&
+    request.customerAccountId.toString() !== socket.accountId &&
+    ["pending_offers", "negotiating"].includes(request.status);
+
+  if (!isOpenForDrivers) {
+    return false;
+  }
+
+  const driverProfile = await DriverProfile.findOne({
+    accountId: socket.accountId,
+  });
+
+  if (!driverProfile) {
+    return false;
+  }
+
+  driverProfile.refreshDebtBlockStatus();
+
+  if (
+    !driverProfile.isActive ||
+    !driverProfile.isOnline ||
+    !driverProfile.isAvailable ||
+    driverProfile.isBlockedForDebt ||
+    driverProfile.activeServiceRequestId ||
+    driverProfile.commissionDebt >= driverProfile.commissionDebtLimit
+  ) {
+    return false;
+  }
+
+  if (!isDevelopment) {
+    if (
+      !driverProfile.isApproved ||
+      driverProfile.reviewStatus !== "approved"
+    ) {
+      return false;
+    }
+  }
+
+  const vehicleQuery = {
+    accountId: socket.accountId,
+    isActive: true,
+    vehicleTypeCode: request.vehicleTypeCode,
+  };
+
+  if (!isDevelopment) {
+    vehicleQuery.isApproved = true;
+    vehicleQuery.reviewStatus = "approved";
+  }
+
+  const matchingVehicle = await DriverVehicle.exists(vehicleQuery);
+
+  return !!matchingVehicle;
 };
 
 const initSocketServer = (httpServer) => {
@@ -307,6 +363,7 @@ const initSocketServer = (httpServer) => {
         }
 
         driverProfile.isOnline = true;
+        driverProfile.isAvailable = !driverProfile.activeServiceRequestId;
         driverProfile.lastOnlineAt = new Date();
 
         if (hasLocation) {
@@ -333,13 +390,18 @@ const initSocketServer = (httpServer) => {
           });
         }
 
-        ioInstance.to("admins").emit("driver:online-status-changed", {
+        const onlinePayload = {
           accountId: socket.accountId,
           isOnline: true,
+          isAvailable: driverProfile.isAvailable,
           currentLat: driverProfile.currentLat,
           currentLng: driverProfile.currentLng,
           vehicleCodes,
-        });
+          driverProfile,
+        };
+
+        socket.emit("driver:online-status-changed", onlinePayload);
+        ioInstance.to("admins").emit("driver:online-status-changed", onlinePayload);
       } catch (error) {
         if (callback) {
           callback({
@@ -365,6 +427,7 @@ const initSocketServer = (httpServer) => {
         }
 
         driverProfile.isOnline = false;
+        driverProfile.isAvailable = false;
         await driverProfile.save();
 
         socket.leave("online_drivers");
@@ -378,13 +441,18 @@ const initSocketServer = (httpServer) => {
           });
         }
 
-        ioInstance.to("admins").emit("driver:online-status-changed", {
+        const offlinePayload = {
           accountId: socket.accountId,
           isOnline: false,
+          isAvailable: false,
           currentLat: driverProfile.currentLat,
           currentLng: driverProfile.currentLng,
           vehicleCodes: [],
-        });
+          driverProfile,
+        };
+
+        socket.emit("driver:online-status-changed", offlinePayload);
+        ioInstance.to("admins").emit("driver:online-status-changed", offlinePayload);
       } catch (error) {
         if (callback) {
           callback({

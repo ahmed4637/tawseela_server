@@ -1976,6 +1976,15 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
       );
     }
 
+    if (
+      request.vehicleTypeCode &&
+      ["pending_offers", "negotiating", "cancelled_by_customer", "expired"].includes(
+        request.status,
+      )
+    ) {
+      emitToVehicle(request.vehicleTypeCode, "request:status-changed", payload);
+    }
+
     getIO().to("admins").emit("admin:request-status-changed", payload);
   });
 
