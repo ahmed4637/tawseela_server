@@ -4,6 +4,7 @@ const Account = require('../models/account.model');
 const DriverProfile = require('../models/driverProfile.model');
 const DriverVehicle = require('../models/driverVehicle.model');
 const ServiceRequest = require('../models/serviceRequest.model');
+const ServiceOffer = require('../models/serviceOffer.model');
 const Rating = require('../models/rating.model');
 const Complaint = require('../models/complaint.model');
 const CommissionTransaction = require('../models/commissionTransaction.model');
@@ -11,6 +12,9 @@ const DriverPayment = require('../models/driverPayment.model');
 const Vehicle = require('../models/vehicle.model');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
+const { createNotification } = require('../services/notification.service');
+const { cancelPromoReservationsForRequest } = require('../services/promo.service');
+const { emitToAccount, emitToAdmins, emitToVehicle, emitToRequest } = require('../sockets/socket.server');
 const {
   approveDriverProfile: approveDriverProfileReview,
   rejectOrRequestUpdateDriverProfile,
@@ -913,6 +917,7 @@ const cancelServiceRequestForAdmin = asyncHandler(async (req, res) => {
   if (
     doc.status === 'cancelled_by_customer' ||
     doc.status === 'cancelled_by_driver' ||
+    doc.status === 'cancelled_by_admin' ||
     doc.status === 'expired' ||
     doc.status === 'driver_no_show' ||
     doc.status === 'customer_no_show'
@@ -922,22 +927,88 @@ const cancelServiceRequestForAdmin = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  doc.status = 'cancelled_by_customer';
-  doc.cancellationReason = reason || 'تم إلغاء الطلب من الإدارة';
-  doc.cancelledAt = new Date();
+  const cancellationReason = reason || 'تم إلغاء الطلب من الإدارة';
+  const now = new Date();
+
+  doc.status = 'cancelled_by_admin';
+  doc.dispatchStatus = 'cancelled';
+  doc.cancellationReason = cancellationReason;
+  doc.cancelledAt = now;
+  doc.lastStatusChangedAt = now;
+  doc.lifecycleLockToken = null;
+  doc.lifecycleLockReason = '';
+  doc.lifecycleLockedAt = null;
 
   await doc.save();
+
+  await ServiceOffer.updateMany(
+    {
+      serviceRequestId: doc._id,
+      status: 'pending',
+    },
+    {
+      status: 'cancelled',
+      closedAt: now,
+      closedBy: 'admin',
+      closedReason: cancellationReason,
+    }
+  );
+
+  await cancelPromoReservationsForRequest({ serviceRequestId: doc._id });
 
   if (doc.acceptedDriverAccountId) {
     await DriverProfile.findOneAndUpdate(
       { accountId: doc.acceptedDriverAccountId },
       {
         activeServiceRequestId: null,
+        currentVehicleId: null,
         isAvailable: true,
       },
       { new: true }
     );
   }
+
+  const notificationData = {
+    serviceRequestId: doc._id,
+    requestCode: doc.requestCode,
+    status: doc.status,
+    cancellationReason,
+  };
+
+  const notificationTargets = [doc.customerAccountId, doc.acceptedDriverAccountId]
+    .filter(Boolean)
+    .map((accountId) => accountId.toString());
+
+  await Promise.all(
+    [...new Set(notificationTargets)].map((accountId) =>
+      createNotification({
+        accountId,
+        title: 'تم إلغاء الطلب من الإدارة',
+        body: cancellationReason,
+        type: 'request',
+        data: notificationData,
+      })
+    )
+  );
+
+  const payload = {
+    request: doc,
+    status: doc.status,
+    reason: cancellationReason,
+  };
+
+  emitToAccount(doc.customerAccountId.toString(), 'request:status-changed', payload);
+
+  if (doc.acceptedDriverAccountId) {
+    emitToAccount(doc.acceptedDriverAccountId.toString(), 'request:status-changed', payload);
+  }
+
+  if (doc.vehicleTypeCode) {
+    emitToVehicle(doc.vehicleTypeCode, 'request:closed', payload);
+  }
+
+  emitToRequest(doc._id.toString(), 'request:status-changed', payload);
+  emitToAdmins('admin:request-cancelled', payload);
 
   return sendSuccess({
     res,

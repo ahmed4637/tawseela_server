@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 
 const ServiceRequest = require("../models/serviceRequest.model");
 const ServiceOffer = require("../models/serviceOffer.model");
@@ -8,7 +9,13 @@ const DriverProfile = require("../models/driverProfile.model");
 const DriverVehicle = require("../models/driverVehicle.model");
 const {
   getSearchRadiusKmByServiceType,
+  getScheduledRequestSettings,
+  getOfferExpiryDate,
+  buildRequestLifecycleDates,
 } = require("../services/appSettings.service");
+const {
+  dispatchServiceRequestToNearbyDrivers,
+} = require("../services/scheduledRequest.service");
 
 const asyncHandler = require("../utils/asyncHandler");
 const { sendSuccess } = require("../utils/apiResponse");
@@ -36,11 +43,13 @@ const {
   applyDriverPromoToCommission,
 } = require("../services/promo.service");
 const {
-  getIO,
+  emitToAdmins,
   emitToAccount,
   emitToRequest,
   emitToVehicle,
 } = require("../sockets/socket.server");
+
+const isDevelopment = process.env.NODE_ENV === "development";
 
 const isValidObjectId = (id) => {
   return mongoose.Types.ObjectId.isValid(id);
@@ -53,6 +62,165 @@ const generateRequestCode = () => {
 
 const roundMoney = (value) => {
   return Math.round((Number(value) || 0) * 100) / 100;
+};
+
+const normalizeDeliveryPaymentResponsibility = (deliveryDetails = {}) => {
+  if (deliveryDetails.itemPaymentResponsibility) {
+    return deliveryDetails.itemPaymentResponsibility;
+  }
+
+  return deliveryDetails.driverWillPayForItems === true
+    ? "driver_pays_pickup"
+    : "customer_pays_pickup";
+};
+
+const buildDeliveryDetailsPayload = (deliveryDetails = {}) => {
+  const itemPaymentResponsibility = normalizeDeliveryPaymentResponsibility(
+    deliveryDetails,
+  );
+  const driverWillPayForItems =
+    itemPaymentResponsibility === "driver_pays_pickup" ||
+    deliveryDetails.driverWillPayForItems === true;
+  const expectedItemCost = roundMoney(deliveryDetails.expectedItemCost || 0);
+  const maxItemCostAllowed = roundMoney(
+    deliveryDetails.maxItemCostAllowed || expectedItemCost || 0,
+  );
+
+  return {
+    itemDescription: deliveryDetails.itemDescription || "",
+    itemCategory: deliveryDetails.itemCategory || "",
+    quantity: Math.max(Number(deliveryDetails.quantity || 1), 1),
+    itemDeclaredValue: roundMoney(deliveryDetails.itemDeclaredValue || 0),
+    pickupContactName: deliveryDetails.pickupContactName || "",
+    pickupContactPhone: deliveryDetails.pickupContactPhone || "",
+    dropoffContactName: deliveryDetails.dropoffContactName || "",
+    dropoffContactPhone: deliveryDetails.dropoffContactPhone || "",
+    itemPaymentResponsibility,
+    driverWillPayForItems,
+    expectedItemCost,
+    maxItemCostAllowed,
+    actualItemCost: 0,
+    itemCostPaidByDriver: false,
+    itemCostConfirmedAt: null,
+    itemCostReimbursementAmount: 0,
+    customerTotalPayableToDriver: 0,
+    commissionableDeliveryFare: 0,
+    pickupStatus: "pending",
+    pickupConfirmedAt: null,
+    pickupProofType: "none",
+    pickupProofUrl: "",
+    pickupProofNote: "",
+    deliveryStatus: "pending",
+    deliveredAt: null,
+    deliveryProofType: "none",
+    deliveryProofUrl: "",
+    deliveryProofNote: "",
+    recipientName: deliveryDetails.dropoffContactName || "",
+    recipientPhone: deliveryDetails.dropoffContactPhone || "",
+    handoffOtp: "",
+    paymentNotes: deliveryDetails.paymentNotes || "",
+  };
+};
+
+const getDeliveryItemReimbursementAmount = (request) => {
+  if (request.serviceType !== "delivery_order") {
+    return 0;
+  }
+
+  const details = request.deliveryDetails || {};
+  const responsibility = normalizeDeliveryPaymentResponsibility(details);
+
+  if (responsibility !== "driver_pays_pickup") {
+    return 0;
+  }
+
+  if (details.itemCostPaidByDriver === false) {
+    return 0;
+  }
+
+  return roundMoney(details.actualItemCost || details.expectedItemCost || 0);
+};
+
+const assertDeliveryOrderRequest = (request) => {
+  if (request.serviceType !== "delivery_order") {
+    const error = new Error("هذا الإجراء متاح لخدمة توصيل الطلبات فقط");
+    error.statusCode = 400;
+    throw error;
+  }
+};
+
+const assertAcceptedDriverForRequest = ({ request, accountId }) => {
+  if (request.acceptedDriverAccountId?.toString() !== accountId) {
+    const error = new Error("السائق المقبول فقط يمكنه تنفيذ هذا الإجراء");
+    error.statusCode = 403;
+    throw error;
+  }
+};
+
+const assertDeliveryItemCostWithinLimit = ({ request, actualItemCost }) => {
+  const details = request.deliveryDetails || {};
+  const maxAllowed = roundMoney(
+    details.maxItemCostAllowed || details.expectedItemCost || 0,
+  );
+
+  if (maxAllowed > 0 && roundMoney(actualItemCost) > maxAllowed) {
+    const error = new Error(
+      `قيمة الطلب الفعلية أكبر من الحد المسموح ${maxAllowed} جنيه`,
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+};
+
+
+const addMinutes = (date, minutes) => {
+  return new Date(new Date(date).getTime() + Number(minutes || 0) * 60 * 1000);
+};
+
+const assertScheduledRideLeadTime = async ({ scheduledAt }) => {
+  const settings = await getScheduledRequestSettings();
+  const scheduledDate = new Date(scheduledAt);
+  const minAllowedDate = addMinutes(new Date(), settings.minLeadMinutes);
+
+  if (scheduledDate < minAllowedDate) {
+    const error = new Error(
+      `وقت الحجز يجب أن يكون بعد ${settings.minLeadMinutes} دقيقة على الأقل`,
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return scheduledDate;
+};
+
+const isRequestDispatchedToDrivers = (request) => {
+  if (request.serviceType !== "scheduled_ride") {
+    return true;
+  }
+
+  return request.dispatchStatus === "dispatched";
+};
+
+const assertRequestCanReceiveDriverActivity = (request) => {
+  if (!isRequestDispatchedToDrivers(request)) {
+    const error = new Error("هذا الحجز غير متاح للسائقين حاليا");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  if (request.requestExpiresAt && new Date(request.requestExpiresAt) <= new Date()) {
+    const error = new Error("انتهت صلاحية هذا الطلب");
+    error.statusCode = 410;
+    throw error;
+  }
+};
+
+const assertOfferStillValid = (offer) => {
+  if (offer.expiresAt && new Date(offer.expiresAt) <= new Date()) {
+    const error = new Error("انتهت صلاحية هذا العرض");
+    error.statusCode = 410;
+    throw error;
+  }
 };
 
 const buildGeoPoint = ({ lat, lng }) => {
@@ -228,6 +396,17 @@ const buildStatusNotifications = (request) => {
       driver: {
         title: "تم إلغاء الطلب",
         body: "تم إلغاء الطلب من طرفك",
+      },
+    },
+
+    cancelled_by_admin: {
+      customer: {
+        title: "تم إلغاء الطلب",
+        body: "تم إلغاء الطلب من الإدارة",
+      },
+      driver: {
+        title: "تم إلغاء الطلب",
+        body: "تم إلغاء الطلب من الإدارة",
       },
     },
 
@@ -477,6 +656,8 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  let scheduledDate = null;
+
   if (serviceType === "scheduled_ride") {
     if (!scheduledAt) {
       const error = new Error("وقت الحجز مطلوب");
@@ -484,18 +665,26 @@ const createServiceRequest = asyncHandler(async (req, res) => {
       throw error;
     }
 
-    const scheduledDate = new Date(scheduledAt);
+    scheduledDate = new Date(scheduledAt);
 
     if (Number.isNaN(scheduledDate.getTime()) || scheduledDate <= new Date()) {
       const error = new Error("وقت الحجز يجب أن يكون في المستقبل");
       error.statusCode = 400;
       throw error;
     }
+
+    scheduledDate = await assertScheduledRideLeadTime({ scheduledAt });
   }
 
   if (serviceType === "delivery_order") {
     if (!deliveryDetails?.itemDescription) {
       const error = new Error("وصف الطلب مطلوب");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (!destination?.address || destination.lat === undefined || destination.lng === undefined) {
+      const error = new Error("وجهة تسليم الطلب مطلوبة");
       error.statusCode = 400;
       throw error;
     }
@@ -538,6 +727,11 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     Math.max(initialCustomerPrice - customerDiscountAmount, 0),
   );
 
+  const lifecycleDates = await buildRequestLifecycleDates({
+    serviceType,
+    scheduledAt: scheduledDate || scheduledAt,
+  });
+
   const doc = await ServiceRequest.create({
     requestCode: generateRequestCode(),
     serviceType,
@@ -567,17 +761,15 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     appCoveredDiscountAmount: customerDiscountAmount,
     customerPayablePrice,
 
-    scheduledAt: serviceType === "scheduled_ride" ? scheduledAt : null,
+    scheduledAt: serviceType === "scheduled_ride" ? scheduledDate : null,
+    dispatchAt: lifecycleDates.dispatchAt,
+    dispatchedAt: lifecycleDates.dispatchedAt,
+    dispatchStatus: lifecycleDates.dispatchStatus,
+    requestExpiresAt: lifecycleDates.requestExpiresAt,
 
     deliveryDetails:
       serviceType === "delivery_order"
-        ? {
-            itemDescription: deliveryDetails.itemDescription,
-            driverWillPayForItems:
-              deliveryDetails.driverWillPayForItems === true,
-            expectedItemCost: Number(deliveryDetails.expectedItemCost) || 0,
-            paymentNotes: deliveryDetails.paymentNotes || "",
-          }
+        ? buildDeliveryDetailsPayload(deliveryDetails)
         : undefined,
 
     status: "pending_offers",
@@ -593,26 +785,36 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     });
   }
 
-  const nearbyDriverAccountIds =
-    await findNearbyDriverAccountIdsForRequest(doc);
+  let nearbyDriversCount = 0;
 
   safeSocketEmit(() => {
     const requestPayload = { request: doc };
     emitToAccount(req.accountId, "request:created", requestPayload);
-    emitToVehicle(doc.vehicleTypeCode, "request:new", requestPayload);
-    nearbyDriverAccountIds.forEach((driverAccountId) => {
-      emitToAccount(driverAccountId, "request:new", requestPayload);
-    });
-    getIO().to("admins").emit("admin:request-created", {
+    emitToAdmins("admin:request-created", {
       request: doc,
-      nearbyDriversCount: nearbyDriverAccountIds.length,
+      nearbyDriversCount,
+      dispatchStatus: doc.dispatchStatus,
     });
   });
+
+  if (doc.dispatchStatus === "dispatched") {
+    const dispatchResult = await dispatchServiceRequestToNearbyDrivers({
+      request: doc,
+      reason: serviceType === "scheduled_ride"
+        ? "scheduled_request_created_immediate_dispatch"
+        : "request_created",
+      notifyCustomer: false,
+    });
+
+    nearbyDriversCount = dispatchResult.driversCount || 0;
+  }
 
   await safeCreateNotification({
     accountId: req.accountId,
     title: "تم إنشاء الطلب",
-    body: "تم إنشاء طلبك بنجاح وفي انتظار عروض السائقين",
+    body: serviceType === "scheduled_ride"
+      ? "تم إرسال الحجز بموعد للسائقين المؤهلين وفي انتظار قبول أحد السائقين"
+      : "تم إنشاء طلبك بنجاح وفي انتظار عروض السائقين",
     type: "request",
     data: {
       serviceRequestId: doc._id,
@@ -625,7 +827,9 @@ const createServiceRequest = asyncHandler(async (req, res) => {
   return sendSuccess({
     res,
     statusCode: 201,
-    message: "تم إنشاء الطلب بنجاح وفي انتظار عروض السائقين",
+    message: serviceType === "scheduled_ride"
+      ? "تم إنشاء الحجز وإرساله للسائقين المؤهلين"
+      : "تم إنشاء الطلب بنجاح وفي انتظار عروض السائقين",
     doc,
   });
 });
@@ -713,6 +917,10 @@ const getAvailableServiceRequestsForDriver = asyncHandler(async (req, res) => {
   const query = {
     customerAccountId: { $ne: req.accountId },
     status: { $in: ["pending_offers", "negotiating"] },
+    $or: [
+      { serviceType: { $ne: "scheduled_ride" } },
+      { dispatchStatus: "dispatched" },
+    ],
     vehicleTypeCode: { $in: vehicleCodes },
     pickupLocation: {
       $near: {
@@ -777,14 +985,556 @@ const activeCustomerRequestStatuses = [
   "arrived_to_pickup",
   "in_progress",
 ];
+
+const openOfferRequestStatuses = ["pending_offers", "negotiating"];
+const terminalRequestStatuses = [
+  "completed",
+  "cancelled_by_customer",
+  "cancelled_by_driver",
+  "cancelled_by_admin",
+  "expired",
+  "driver_no_show",
+  "customer_no_show",
+];
+
+const requestStatusTransitions = {
+  pending_offers: ["negotiating", "cancelled_by_customer", "expired"],
+  negotiating: ["cancelled_by_customer", "offer_accepted", "expired"],
+  offer_accepted: ["driver_arriving", "cancelled_by_customer", "cancelled_by_driver"],
+  driver_arriving: [
+    "arrived_to_pickup",
+    "cancelled_by_customer",
+    "cancelled_by_driver",
+    "driver_no_show",
+  ],
+  arrived_to_pickup: [
+    "in_progress",
+    "cancelled_by_customer",
+    "cancelled_by_driver",
+    "customer_no_show",
+  ],
+  in_progress: ["completed", "cancelled_by_customer", "cancelled_by_driver"],
+};
+
+const assertStatusTransitionAllowed = ({ currentStatus, nextStatus }) => {
+  if (currentStatus === nextStatus) {
+    const error = new Error("الطلب موجود بالفعل على نفس الحالة");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (terminalRequestStatuses.includes(currentStatus)) {
+    const error = new Error("لا يمكن تحديث طلب منتهي أو ملغي");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const allowedNextStatuses = requestStatusTransitions[currentStatus] || [];
+
+  if (!allowedNextStatuses.includes(nextStatus)) {
+    const error = new Error(
+      `لا يمكن نقل الطلب من الحالة ${currentStatus} إلى ${nextStatus}`,
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+};
+
+const buildAcceptanceLockFilter = (requestId) => {
+  const staleLockDate = new Date(Date.now() - 2 * 60 * 1000);
+
+  return {
+    _id: requestId,
+    status: { $in: openOfferRequestStatuses },
+    acceptedOfferId: null,
+    $or: [
+      { lifecycleLockToken: null },
+      { lifecycleLockToken: "" },
+      { lifecycleLockedAt: { $lt: staleLockDate } },
+    ],
+  };
+};
+
+const releaseRequestLifecycleLock = async ({ requestId, lockToken }) => {
+  if (!requestId || !lockToken) return;
+
+  await ServiceRequest.updateOne(
+    {
+      _id: requestId,
+      lifecycleLockToken: lockToken,
+    },
+    {
+      $set: {
+        lifecycleLockReason: "",
+      },
+      $unset: {
+        lifecycleLockToken: "",
+        lifecycleLockedAt: "",
+      },
+    },
+  );
+};
+
+const assertRequestNotLifecycleLocked = (request) => {
+  if (!request?.lifecycleLockToken) return;
+
+  const lockedAt = request.lifecycleLockedAt
+    ? new Date(request.lifecycleLockedAt).getTime()
+    : 0;
+
+  const isFreshLock = lockedAt && Date.now() - lockedAt < 2 * 60 * 1000;
+
+  if (isFreshLock) {
+    const error = new Error("يتم تأكيد عرض على هذا الطلب الآن، حاول مرة أخرى بعد لحظات");
+    error.statusCode = 409;
+    throw error;
+  }
+};
+
+const releaseDriverFromRequest = async ({ driverAccountId, requestId }) => {
+  if (!driverAccountId || !requestId) return;
+
+  await DriverProfile.findOneAndUpdate(
+    {
+      accountId: driverAccountId,
+      activeServiceRequestId: requestId,
+    },
+    {
+      activeServiceRequestId: null,
+      currentVehicleId: null,
+      isAvailable: true,
+    },
+  );
+};
+
+const closePendingOffersBecauseAccepted = async ({
+  requestId,
+  acceptedOfferId,
+}) => {
+  const pendingOffers = await ServiceOffer.find({
+    serviceRequestId: requestId,
+    _id: { $ne: acceptedOfferId },
+    status: "pending",
+  }).select("driverAccountId sentBy offeredPrice");
+
+  await ServiceOffer.updateMany(
+    {
+      serviceRequestId: requestId,
+      _id: { $ne: acceptedOfferId },
+      status: "pending",
+    },
+    {
+      status: "rejected",
+      rejectedAt: new Date(),
+      closedAt: new Date(),
+      closedBy: "system",
+      closedReason: "تم إغلاق العرض بسبب قبول عرض آخر لنفس الطلب",
+    },
+  );
+
+  return pendingOffers;
+};
+
+const emitClosedOffersAfterAcceptance = async ({
+  request,
+  acceptedOffer,
+  closedOffers,
+}) => {
+  const closedDriverAccountIds = [
+    ...new Set(
+      closedOffers
+        .map((offer) => offer.driverAccountId?.toString())
+        .filter(
+          (accountId) =>
+            accountId &&
+            accountId !== acceptedOffer.driverAccountId.toString(),
+        ),
+    ),
+  ];
+
+  safeSocketEmit(() => {
+    for (const driverAccountId of closedDriverAccountIds) {
+      emitToAccount(driverAccountId, "offer:closed", {
+        requestId: request._id,
+        serviceRequestId: request._id,
+        reason: "other_driver_accepted",
+        message: "تم إغلاق الطلب لأن العميل قبل عرض سائق آخر",
+      });
+
+      emitToAccount(driverAccountId, "request:removed", {
+        requestId: request._id,
+        serviceRequestId: request._id,
+        reason: "other_driver_accepted",
+        message: "تم إزالة الطلب لأن العميل قبل عرض سائق آخر",
+      });
+    }
+
+    if (request.vehicleTypeCode) {
+      emitToVehicle(request.vehicleTypeCode, "request:closed", {
+        requestId: request._id,
+        serviceRequestId: request._id,
+        reason: "other_driver_accepted",
+      });
+    }
+  });
+
+  setImmediate(() => {
+    for (const driverAccountId of closedDriverAccountIds) {
+      safeCreateNotification({
+        accountId: driverAccountId,
+        title: "تم إغلاق الطلب",
+        body: "تم إغلاق الطلب لأن العميل قبل عرض سائق آخر",
+        type: "offer",
+        data: {
+          serviceRequestId: request._id,
+          reason: "other_driver_accepted",
+        },
+      });
+    }
+  });
+};
+
+const acceptPendingOfferSafely = async ({
+  requestId,
+  offerId,
+  actorAccountId,
+  acceptedBy,
+}) => {
+  const request = await ensureRequestExists(requestId);
+
+  if (!openOfferRequestStatuses.includes(request.status)) {
+    const error = new Error("لا يمكن قبول عرض على هذا الطلب حاليًا");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  assertRequestCanReceiveDriverActivity(request);
+
+  if (request.acceptedOfferId || request.acceptedDriverAccountId) {
+    const error = new Error("تم قبول عرض لهذا الطلب بالفعل");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  if (acceptedBy === "customer" && request.customerAccountId.toString() !== actorAccountId) {
+    const error = new Error("العميل صاحب الطلب فقط يمكنه قبول العرض");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const expectedSentBy = acceptedBy === "customer" ? "driver" : "customer";
+
+  const offer = await ServiceOffer.findOne({
+    _id: offerId,
+    serviceRequestId: request._id,
+    status: "pending",
+    sentBy: expectedSentBy,
+  });
+
+  if (!offer) {
+    const error = new Error("العرض غير موجود أو لم يعد متاحًا");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  assertOfferStillValid(offer);
+
+  if (acceptedBy === "driver" && offer.driverAccountId.toString() !== actorAccountId) {
+    const error = new Error("السائق صاحب العرض فقط يمكنه قبول السعر المضاد");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const driverProfile = await ensureDriverCanWork(offer.driverAccountId.toString());
+
+  const acceptedDriverVehicle = await DriverVehicle.findOne({
+    _id: offer.driverVehicleId,
+    accountId: offer.driverAccountId,
+    vehicleTypeCode: request.vehicleTypeCode,
+    isActive: true,
+    isApproved: true,
+    reviewStatus: "approved",
+  });
+
+  if (!acceptedDriverVehicle) {
+    const error = new Error("مركبة السائق لم تعد صالحة لهذا الطلب");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lockToken = crypto.randomUUID();
+  let driverLocked = false;
+
+  const lockedRequest = await ServiceRequest.findOneAndUpdate(
+    buildAcceptanceLockFilter(request._id),
+    {
+      lifecycleLockToken: lockToken,
+      lifecycleLockReason: "accept_offer",
+      lifecycleLockedAt: new Date(),
+    },
+    {
+      new: true,
+      runValidators: true,
+    },
+  );
+
+  if (!lockedRequest) {
+    const error = new Error("تم قبول عرض آخر أو الطلب لم يعد متاحًا");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  try {
+    const lockedDriverProfile = await DriverProfile.findOneAndUpdate(
+      {
+        _id: driverProfile._id,
+        activeServiceRequestId: null,
+        isActive: true,
+        isOnline: true,
+        isAvailable: true,
+        isApproved: true,
+        reviewStatus: "approved",
+        isBlockedForDebt: false,
+        $expr: {
+          $lt: ["$commissionDebt", "$commissionDebtLimit"],
+        },
+      },
+      {
+        activeServiceRequestId: request._id,
+        currentVehicleId: offer.driverVehicleId,
+        isAvailable: false,
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+
+    if (!lockedDriverProfile) {
+      const error = new Error("السائق لم يعد متاحًا لهذا الطلب");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    driverLocked = true;
+
+    const vehicle = await Vehicle.findOne({
+      code: request.vehicleTypeCode,
+    });
+
+    const commissionPercent = getCommissionPercent(vehicle, request.serviceType);
+    const finalPrice = roundMoney(offer.offeredPrice);
+    const grossCommissionAmount = roundMoney((finalPrice * commissionPercent) / 100);
+    const acceptedAt = new Date();
+
+    offer.status = "accepted";
+    offer.acceptedAt = acceptedAt;
+    offer.closedAt = acceptedAt;
+    offer.closedBy = acceptedBy;
+    offer.closedReason = "تم قبول العرض وتأكيد الطلب";
+    await offer.save();
+
+    const closedOffers = await closePendingOffersBecauseAccepted({
+      requestId: request._id,
+      acceptedOfferId: offer._id,
+    });
+
+    await ServiceRequest.updateOne(
+      {
+        _id: request._id,
+        lifecycleLockToken: lockToken,
+      },
+      {
+        $set: {
+          status: "offer_accepted",
+          acceptedDriverAccountId: offer.driverAccountId,
+          acceptedDriverVehicleId: offer.driverVehicleId,
+          acceptedOfferId: offer._id,
+          finalPrice,
+          customerPayablePrice: roundMoney(
+            Math.max(finalPrice - Number(request.customerDiscountAmount || 0), 0),
+          ),
+          commissionPercent,
+          grossCommissionAmount,
+          driverPromoCodeId: offer.driverPromoCodeId || null,
+          driverPromoCode: offer.driverPromoCode || "",
+          driverPromoSnapshot: offer.driverPromoSnapshot || null,
+          driverPromoDiscountAmount: 0,
+          commissionAmount: grossCommissionAmount,
+          confirmedAt: acceptedAt,
+          lastStatusChangedAt: acceptedAt,
+          lifecycleLockReason: "",
+        },
+        $unset: {
+          lifecycleLockToken: "",
+          lifecycleLockedAt: "",
+        },
+      },
+      {
+        runValidators: true,
+      },
+    );
+
+    const acceptedRequest = await ServiceRequest.findById(request._id);
+
+    if (offer.driverPromoCodeId) {
+      await reserveDriverPromoForAcceptedOffer({
+        promoCodeId: offer.driverPromoCodeId,
+        code: offer.driverPromoCode,
+        accountId: offer.driverAccountId,
+        serviceRequestId: acceptedRequest._id,
+        serviceOfferId: offer._id,
+        estimatedDiscountAmount: offer.estimatedDriverPromoDiscountAmount,
+      });
+    }
+
+    const chatRoom = await createChatRoomForAcceptedRequest({
+      request: acceptedRequest,
+      offer,
+    });
+
+    const acceptedRequestForParties = await loadEnrichedRequestById({
+      requestId: acceptedRequest._id,
+      includeContactInfo: true,
+    });
+
+    const acceptedRequestPublic = await loadEnrichedRequestById({
+      requestId: acceptedRequest._id,
+      includeContactInfo: false,
+    });
+
+    const acceptedOfferForResponse =
+      (await loadEnrichedOfferById(offer._id)) || offer;
+
+    safeSocketEmit(() => {
+      if (acceptedBy === "customer") {
+        emitToAccount(offer.driverAccountId.toString(), "offer:accepted", {
+          request: acceptedRequestForParties,
+          offer: acceptedOfferForResponse,
+          chatRoom,
+        });
+
+        emitToAccount(request.customerAccountId.toString(), "request:confirmed", {
+          request: acceptedRequestForParties,
+          offer: acceptedOfferForResponse,
+          chatRoom,
+        });
+      } else {
+        emitToAccount(
+          request.customerAccountId.toString(),
+          "offer:accepted-by-driver",
+          {
+            request: acceptedRequestForParties,
+            offer: acceptedOfferForResponse,
+            chatRoom,
+          },
+        );
+
+        emitToAccount(offer.driverAccountId.toString(), "request:confirmed", {
+          request: acceptedRequestForParties,
+          offer: acceptedOfferForResponse,
+          chatRoom,
+        });
+      }
+
+      emitToRequest(acceptedRequest._id.toString(), "request:confirmed", {
+        request: acceptedRequestPublic,
+        offer: acceptedOfferForResponse,
+        chatRoom,
+      });
+
+      emitToAccount(request.customerAccountId.toString(), "chat:room-created", {
+        requestId: acceptedRequest._id,
+        serviceRequestId: acceptedRequest._id,
+        room: chatRoom,
+      });
+
+      emitToAccount(offer.driverAccountId.toString(), "chat:room-created", {
+        requestId: acceptedRequest._id,
+        serviceRequestId: acceptedRequest._id,
+        room: chatRoom,
+      });
+
+      emitToAdmins("admin:request-confirmed", {
+        request: acceptedRequestForParties,
+        offer: acceptedOfferForResponse,
+        chatRoom,
+      });
+    });
+
+    await emitClosedOffersAfterAcceptance({
+      request: acceptedRequest,
+      acceptedOffer: offer,
+      closedOffers,
+    });
+
+    await safeCreateNotification({
+      accountId: request.customerAccountId,
+      title: acceptedBy === "customer" ? "تم تأكيد الطلب" : "السائق وافق على السعر",
+      body:
+        acceptedBy === "customer"
+          ? `تم قبول العرض وتأكيد الطلب بسعر ${acceptedRequest.finalPrice} جنيه`
+          : `السائق وافق على السعر ${acceptedRequest.finalPrice} جنيه وتم تأكيد الطلب`,
+      type: "request",
+      data: {
+        serviceRequestId: acceptedRequest._id,
+        offerId: offer._id,
+        finalPrice: acceptedRequest.finalPrice,
+      },
+    });
+
+    await safeCreateNotification({
+      accountId: offer.driverAccountId,
+      title: acceptedBy === "customer" ? "تم قبول عرضك" : "تم تأكيد الطلب",
+      body:
+        acceptedBy === "customer"
+          ? `العميل قبل عرضك بسعر ${acceptedRequest.finalPrice} جنيه`
+          : `تم تأكيد الطلب بسعر ${acceptedRequest.finalPrice} جنيه`,
+      type: acceptedBy === "customer" ? "offer" : "request",
+      data: {
+        serviceRequestId: acceptedRequest._id,
+        offerId: offer._id,
+        finalPrice: acceptedRequest.finalPrice,
+      },
+    });
+
+    return {
+      request: acceptedRequestForParties,
+      acceptedOffer: acceptedOfferForResponse,
+      chatRoom,
+    };
+  } catch (error) {
+    await releaseRequestLifecycleLock({
+      requestId: request._id,
+      lockToken,
+    });
+
+    if (driverLocked) {
+      await releaseDriverFromRequest({
+        driverAccountId: offer.driverAccountId,
+        requestId: request._id,
+      });
+    }
+
+    throw error;
+  }
+};
+
 const ensureCustomerHasNoActiveRequest = async (accountId) => {
   const activeRequest = await ServiceRequest.findOne({
     customerAccountId: accountId,
     status: { $in: activeCustomerRequestStatuses },
+    $or: [
+      { serviceType: { $ne: "scheduled_ride" } },
+      { serviceType: "scheduled_ride", dispatchStatus: "dispatched" },
+      { serviceType: "scheduled_ride", status: { $in: confirmedStatuses } },
+    ],
   })
-    .select("_id requestCode status serviceType")
+    .select("_id requestCode status serviceType dispatchStatus scheduledAt")
     .lean();
+
   if (!activeRequest) return;
+
   const error = new Error(
     "لديك طلب نشط بالفعل. لا يمكن إنشاء طلب جديد قبل إنهاء أو إلغاء الطلب الحالي",
   );
@@ -940,6 +1690,14 @@ const loadEnrichedRequestById = async ({
 };
 
 const canDriverViewOpenRequest = async ({ accountId, request }) => {
+  if (!isRequestDispatchedToDrivers(request)) {
+    return false;
+  }
+
+  if (request.requestExpiresAt && new Date(request.requestExpiresAt) <= new Date()) {
+    return false;
+  }
+
   const driverProfile = await ensureDriverCanWork(accountId);
 
   const vehicleQuery = {
@@ -1070,12 +1828,15 @@ const createDriverOffer = asyncHandler(async (req, res) => {
   }
 
   const request = await ensureRequestExists(req.params.id);
+  assertRequestNotLifecycleLocked(request);
 
   if (!["pending_offers", "negotiating"].includes(request.status)) {
     const error = new Error("لا يمكن إرسال عرض على هذا الطلب حاليًا");
     error.statusCode = 400;
     throw error;
   }
+
+  assertRequestCanReceiveDriverActivity(request);
 
   if (request.customerAccountId.toString() === req.accountId) {
     const error = new Error("لا يمكن للسائق إرسال عرض على طلبه الشخصي");
@@ -1178,6 +1939,7 @@ const createDriverOffer = asyncHandler(async (req, res) => {
       driverPromoResult?.discountAmount || 0,
     );
     offer.parentOfferId = pendingCustomerCounter?._id || offer.parentOfferId;
+    offer.expiresAt = await getOfferExpiryDate();
     await offer.save();
   } else {
     offer = await ServiceOffer.create({
@@ -1195,6 +1957,7 @@ const createDriverOffer = asyncHandler(async (req, res) => {
       status: "pending",
       sentBy: "driver",
       parentOfferId: pendingCustomerCounter?._id || null,
+      expiresAt: await getOfferExpiryDate(),
     });
   }
 
@@ -1219,7 +1982,7 @@ const createDriverOffer = asyncHandler(async (req, res) => {
       request,
     });
 
-    getIO().to("admins").emit("admin:offer-created", {
+    emitToAdmins("admin:offer-created", {
       requestId: request._id,
       serviceRequestId: request._id,
       offer: offerForResponse,
@@ -1248,215 +2011,23 @@ const createDriverOffer = asyncHandler(async (req, res) => {
 });
 
 const acceptOffer = asyncHandler(async (req, res) => {
-  const request = await ensureRequestExists(req.params.id);
-
-  if (request.customerAccountId.toString() !== req.accountId) {
-    const error = new Error("العميل صاحب الطلب فقط يمكنه قبول العرض");
-    error.statusCode = 403;
-    throw error;
-  }
-
-  if (!["pending_offers", "negotiating"].includes(request.status)) {
-    const error = new Error("لا يمكن قبول عرض على هذا الطلب حاليًا");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const { offerId } = req.params;
-
-  const offer = await ServiceOffer.findOne({
-    _id: offerId,
-    serviceRequestId: request._id,
-    status: "pending",
-  });
-
-  if (!offer) {
-    const error = new Error("العرض غير موجود أو لم يعد متاحًا");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  if (offer.sentBy !== "driver") {
-    const error = new Error(
-      "لا يمكن للعميل قبول عرض مرسل منه، يجب انتظار موافقة السائق",
-    );
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const driverProfile = await ensureDriverCanWork(
-    offer.driverAccountId.toString(),
-  );
-
-  const vehicle = await Vehicle.findOne({
-    code: request.vehicleTypeCode,
-  });
-
-  const commissionPercent = getCommissionPercent(vehicle, request.serviceType);
-  const finalPrice = roundMoney(offer.offeredPrice);
-  const grossCommissionAmount = roundMoney((finalPrice * commissionPercent) / 100);
-
-  const lockedDriverProfile = await DriverProfile.findOneAndUpdate(
-    {
-      _id: driverProfile._id,
-      activeServiceRequestId: null,
-      isBlockedForDebt: false,
-    },
-    {
-      activeServiceRequestId: request._id,
-      currentVehicleId: offer.driverVehicleId,
-      isAvailable: false,
-    },
-    {
-      new: true,
-      runValidators: true,
-    },
-  );
-
-  if (!lockedDriverProfile) {
-    const error = new Error("السائق لم يعد متاحًا لهذا الطلب");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  offer.status = "accepted";
-  offer.acceptedAt = new Date();
-  await offer.save();
-
-  await ServiceOffer.updateMany(
-    {
-      serviceRequestId: request._id,
-      _id: { $ne: offer._id },
-      status: "pending",
-    },
-    {
-      status: "rejected",
-      rejectedAt: new Date(),
-    },
-  );
-
-  request.status = "offer_accepted";
-  request.acceptedDriverAccountId = offer.driverAccountId;
-  request.acceptedDriverVehicleId = offer.driverVehicleId;
-  request.acceptedOfferId = offer._id;
-  request.finalPrice = finalPrice;
-  request.customerPayablePrice = roundMoney(
-    Math.max(finalPrice - Number(request.customerDiscountAmount || 0), 0),
-  );
-  request.commissionPercent = commissionPercent;
-  request.grossCommissionAmount = grossCommissionAmount;
-  request.driverPromoCodeId = offer.driverPromoCodeId || null;
-  request.driverPromoCode = offer.driverPromoCode || "";
-  request.driverPromoSnapshot = offer.driverPromoSnapshot || null;
-  request.driverPromoDiscountAmount = 0;
-  request.commissionAmount = grossCommissionAmount;
-
-  await request.save();
-
-  if (offer.driverPromoCodeId) {
-    await reserveDriverPromoForAcceptedOffer({
-      promoCodeId: offer.driverPromoCodeId,
-      code: offer.driverPromoCode,
-      accountId: offer.driverAccountId,
-      serviceRequestId: request._id,
-      serviceOfferId: offer._id,
-      estimatedDiscountAmount: offer.estimatedDriverPromoDiscountAmount,
-    });
-  }
-
-  const chatRoom = await createChatRoomForAcceptedRequest({
-    request,
-    offer,
-  });
-
-  const acceptedRequestForParties = await loadEnrichedRequestById({
-    requestId: request._id,
-    includeContactInfo: true,
-  });
-
-  const acceptedRequestPublic = await loadEnrichedRequestById({
-    requestId: request._id,
-    includeContactInfo: false,
-  });
-
-  const acceptedOfferForResponse =
-    (await loadEnrichedOfferById(offer._id)) || offer;
-
-  safeSocketEmit(() => {
-    emitToAccount(offer.driverAccountId.toString(), "offer:accepted", {
-      request: acceptedRequestForParties,
-      offer: acceptedOfferForResponse,
-      chatRoom,
-    });
-
-    emitToAccount(request.customerAccountId.toString(), "request:confirmed", {
-      request: acceptedRequestForParties,
-      offer: acceptedOfferForResponse,
-      chatRoom,
-    });
-
-    emitToRequest(request._id.toString(), "request:confirmed", {
-      request: acceptedRequestPublic,
-      offer: acceptedOfferForResponse,
-      chatRoom,
-    });
-
-    emitToAccount(request.customerAccountId.toString(), "chat:room-created", {
-      requestId: request._id,
-      serviceRequestId: request._id,
-      room: chatRoom,
-    });
-
-    emitToAccount(offer.driverAccountId.toString(), "chat:room-created", {
-      requestId: request._id,
-      serviceRequestId: request._id,
-      room: chatRoom,
-    });
-
-    getIO().to("admins").emit("admin:request-confirmed", {
-      request: acceptedRequestForParties,
-      offer: acceptedOfferForResponse,
-      chatRoom,
-    });
-  });
-
-  await safeCreateNotification({
-    accountId: request.customerAccountId,
-    title: "تم تأكيد الطلب",
-    body: `تم قبول العرض وتأكيد الطلب بسعر ${request.finalPrice} جنيه`,
-    type: "request",
-    data: {
-      serviceRequestId: request._id,
-      offerId: offer._id,
-      finalPrice: request.finalPrice,
-    },
-  });
-
-  await safeCreateNotification({
-    accountId: offer.driverAccountId,
-    title: "تم قبول عرضك",
-    body: `العميل قبل عرضك بسعر ${request.finalPrice} جنيه`,
-    type: "offer",
-    data: {
-      serviceRequestId: request._id,
-      offerId: offer._id,
-      finalPrice: request.finalPrice,
-    },
+  const result = await acceptPendingOfferSafely({
+    requestId: req.params.id,
+    offerId: req.params.offerId,
+    actorAccountId: req.accountId,
+    acceptedBy: "customer",
   });
 
   return sendSuccess({
     res,
     message: "تم قبول العرض وتأكيد الطلب بنجاح",
-    doc: {
-      request: acceptedRequestForParties,
-      acceptedOffer: acceptedOfferForResponse,
-      chatRoom,
-    },
+    doc: result,
   });
 });
 
 const createCustomerCounterOffer = asyncHandler(async (req, res) => {
   const request = await ensureRequestExists(req.params.id);
+  assertRequestNotLifecycleLocked(request);
 
   if (request.customerAccountId.toString() !== req.accountId) {
     const error = new Error("العميل صاحب الطلب فقط يمكنه إرسال سعر مضاد");
@@ -1469,6 +2040,8 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
     error.statusCode = 400;
     throw error;
   }
+
+  assertRequestCanReceiveDriverActivity(request);
 
   const { offerId } = req.params;
   const { offeredPrice, message } = req.body;
@@ -1484,6 +2057,8 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
     error.statusCode = 404;
     throw error;
   }
+
+  assertOfferStillValid(parentOffer);
 
   if (parentOffer.sentBy !== "driver") {
     const error = new Error("يمكن إرسال سعر مضاد فقط على عرض مرسل من السائق");
@@ -1523,6 +2098,7 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
     status: "pending",
     sentBy: "customer",
     parentOfferId: parentOffer._id,
+    expiresAt: await getOfferExpiryDate(),
   });
 
   request.status = "negotiating";
@@ -1546,7 +2122,7 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
       request,
     });
 
-    getIO().to("admins").emit("admin:offer-countered", {
+    emitToAdmins("admin:offer-countered", {
       requestId: request._id,
       serviceRequestId: request._id,
       offer: counterOfferForResponse,
@@ -1575,210 +2151,23 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
 });
 
 const acceptCustomerCounterOffer = asyncHandler(async (req, res) => {
-  const request = await ensureRequestExists(req.params.id);
-
-  if (!["pending_offers", "negotiating"].includes(request.status)) {
-    const error = new Error("لا يمكن قبول هذا السعر حاليًا");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  const { offerId } = req.params;
-
-  const offer = await ServiceOffer.findOne({
-    _id: offerId,
-    serviceRequestId: request._id,
-    status: "pending",
-    sentBy: "customer",
-  });
-
-  if (!offer) {
-    const error = new Error("السعر المضاد غير موجود أو لم يعد متاحًا");
-    error.statusCode = 404;
-    throw error;
-  }
-
-  if (offer.driverAccountId.toString() !== req.accountId) {
-    const error = new Error("السائق صاحب العرض فقط يمكنه قبول السعر المضاد");
-    error.statusCode = 403;
-    throw error;
-  }
-
-  const driverProfile = await ensureDriverCanWork(req.accountId);
-
-  const vehicle = await Vehicle.findOne({
-    code: request.vehicleTypeCode,
-  });
-
-  const commissionPercent = getCommissionPercent(vehicle, request.serviceType);
-  const finalPrice = roundMoney(offer.offeredPrice);
-  const grossCommissionAmount = roundMoney((finalPrice * commissionPercent) / 100);
-
-  const lockedDriverProfile = await DriverProfile.findOneAndUpdate(
-    {
-      _id: driverProfile._id,
-      activeServiceRequestId: null,
-      isBlockedForDebt: false,
-    },
-    {
-      activeServiceRequestId: request._id,
-      currentVehicleId: offer.driverVehicleId,
-      isAvailable: false,
-    },
-    {
-      new: true,
-      runValidators: true,
-    },
-  );
-
-  if (!lockedDriverProfile) {
-    const error = new Error("السائق لم يعد متاحًا لهذا الطلب");
-    error.statusCode = 400;
-    throw error;
-  }
-
-  offer.status = "accepted";
-  offer.acceptedAt = new Date();
-  await offer.save();
-
-  await ServiceOffer.updateMany(
-    {
-      serviceRequestId: request._id,
-      _id: { $ne: offer._id },
-      status: "pending",
-    },
-    {
-      status: "rejected",
-      rejectedAt: new Date(),
-    },
-  );
-
-  request.status = "offer_accepted";
-  request.acceptedDriverAccountId = offer.driverAccountId;
-  request.acceptedDriverVehicleId = offer.driverVehicleId;
-  request.acceptedOfferId = offer._id;
-  request.finalPrice = finalPrice;
-  request.customerPayablePrice = roundMoney(
-    Math.max(finalPrice - Number(request.customerDiscountAmount || 0), 0),
-  );
-  request.commissionPercent = commissionPercent;
-  request.grossCommissionAmount = grossCommissionAmount;
-  request.driverPromoCodeId = offer.driverPromoCodeId || null;
-  request.driverPromoCode = offer.driverPromoCode || "";
-  request.driverPromoSnapshot = offer.driverPromoSnapshot || null;
-  request.driverPromoDiscountAmount = 0;
-  request.commissionAmount = grossCommissionAmount;
-
-  await request.save();
-
-  if (offer.driverPromoCodeId) {
-    await reserveDriverPromoForAcceptedOffer({
-      promoCodeId: offer.driverPromoCodeId,
-      code: offer.driverPromoCode,
-      accountId: offer.driverAccountId,
-      serviceRequestId: request._id,
-      serviceOfferId: offer._id,
-      estimatedDiscountAmount: offer.estimatedDriverPromoDiscountAmount,
-    });
-  }
-
-  const chatRoom = await createChatRoomForAcceptedRequest({
-    request,
-    offer,
-  });
-
-  const acceptedRequestForParties = await loadEnrichedRequestById({
-    requestId: request._id,
-    includeContactInfo: true,
-  });
-
-  const acceptedRequestPublic = await loadEnrichedRequestById({
-    requestId: request._id,
-    includeContactInfo: false,
-  });
-
-  const acceptedOfferForResponse =
-    (await loadEnrichedOfferById(offer._id)) || offer;
-
-  safeSocketEmit(() => {
-    emitToAccount(
-      request.customerAccountId.toString(),
-      "offer:accepted-by-driver",
-      {
-        request: acceptedRequestForParties,
-        offer: acceptedOfferForResponse,
-        chatRoom,
-      },
-    );
-
-    emitToAccount(offer.driverAccountId.toString(), "request:confirmed", {
-      request: acceptedRequestForParties,
-      offer: acceptedOfferForResponse,
-      chatRoom,
-    });
-
-    emitToRequest(request._id.toString(), "request:confirmed", {
-      request: acceptedRequestPublic,
-      offer: acceptedOfferForResponse,
-      chatRoom,
-    });
-
-    emitToAccount(request.customerAccountId.toString(), "chat:room-created", {
-      requestId: request._id,
-      serviceRequestId: request._id,
-      room: chatRoom,
-    });
-
-    emitToAccount(offer.driverAccountId.toString(), "chat:room-created", {
-      requestId: request._id,
-      serviceRequestId: request._id,
-      room: chatRoom,
-    });
-
-    getIO().to("admins").emit("admin:request-confirmed", {
-      request: acceptedRequestForParties,
-      offer: acceptedOfferForResponse,
-      chatRoom,
-    });
-  });
-
-  await safeCreateNotification({
-    accountId: request.customerAccountId,
-    title: "السائق وافق على السعر",
-    body: `السائق وافق على السعر ${request.finalPrice} جنيه وتم تأكيد الطلب`,
-    type: "request",
-    data: {
-      serviceRequestId: request._id,
-      offerId: offer._id,
-      finalPrice: request.finalPrice,
-    },
-  });
-
-  await safeCreateNotification({
-    accountId: offer.driverAccountId,
-    title: "تم تأكيد الطلب",
-    body: `تم تأكيد الطلب بسعر ${request.finalPrice} جنيه`,
-    type: "request",
-    data: {
-      serviceRequestId: request._id,
-      offerId: offer._id,
-      finalPrice: request.finalPrice,
-    },
+  const result = await acceptPendingOfferSafely({
+    requestId: req.params.id,
+    offerId: req.params.offerId,
+    actorAccountId: req.accountId,
+    acceptedBy: "driver",
   });
 
   return sendSuccess({
     res,
     message: "تم قبول السعر المضاد وتأكيد الطلب بنجاح",
-    doc: {
-      request: acceptedRequestForParties,
-      acceptedOffer: acceptedOfferForResponse,
-      chatRoom,
-    },
+    doc: result,
   });
 });
 
 const rejectOffer = asyncHandler(async (req, res) => {
   const request = await ensureRequestExists(req.params.id);
+  assertRequestNotLifecycleLocked(request);
 
   if (request.customerAccountId.toString() !== req.accountId) {
     const error = new Error("العميل صاحب الطلب فقط يمكنه رفض العرض");
@@ -1799,6 +2188,8 @@ const rejectOffer = asyncHandler(async (req, res) => {
     error.statusCode = 404;
     throw error;
   }
+
+  assertOfferStillValid(offer);
 
   offer.status = "rejected";
   offer.rejectedAt = new Date();
@@ -1836,6 +2227,7 @@ const rejectOffer = asyncHandler(async (req, res) => {
 
 const rejectCustomerCounterOffer = asyncHandler(async (req, res) => {
   const request = await ensureRequestExists(req.params.id);
+  assertRequestNotLifecycleLocked(request);
 
   const { offerId } = req.params;
 
@@ -1851,6 +2243,8 @@ const rejectCustomerCounterOffer = asyncHandler(async (req, res) => {
     error.statusCode = 404;
     throw error;
   }
+
+  assertOfferStillValid(offer);
 
   if (offer.driverAccountId.toString() !== req.accountId) {
     const error = new Error("السائق صاحب العرض فقط يمكنه رفض السعر المضاد");
@@ -1910,6 +2304,12 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     manualAdjustment,
     extraFare,
     finalFareNote,
+    deliveryProofType,
+    deliveryProofUrl,
+    deliveryProofNote,
+    recipientName,
+    recipientPhone,
+    handoffOtp,
   } = req.body;
 
   const statusBeforeUpdate = request.status;
@@ -1929,25 +2329,16 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     "customer_no_show",
   ];
 
-  const terminalStatuses = [
-    "completed",
-    "cancelled_by_customer",
-    "cancelled_by_driver",
-    "driver_no_show",
-    "customer_no_show",
-  ];
-
   if (!allowedStatuses.includes(status)) {
     const error = new Error("حالة الطلب غير صحيحة");
     error.statusCode = 400;
     throw error;
   }
 
-  if (terminalStatuses.includes(request.status)) {
-    const error = new Error("لا يمكن تحديث طلب منتهي أو ملغي");
-    error.statusCode = 400;
-    throw error;
-  }
+  assertStatusTransitionAllowed({
+    currentStatus: request.status,
+    nextStatus: status,
+  });
 
   if (status === "cancelled_by_customer" && !isCustomer) {
     const error = new Error("العميل صاحب الطلب فقط يمكنه إلغاء الطلب");
@@ -1974,10 +2365,12 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
 
   if (status === "driver_arriving") {
     request.status = "driver_arriving";
+    request.driverArrivingAt = request.driverArrivingAt || new Date();
   }
 
   if (status === "arrived_to_pickup") {
     request.status = "arrived_to_pickup";
+    request.arrivedAt = request.arrivedAt || new Date();
   }
 
   if (status === "in_progress") {
@@ -1986,6 +2379,36 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
   }
 
   if (status === "completed") {
+    if (request.serviceType === "delivery_order") {
+      const details = request.deliveryDetails || {};
+
+      if (details.pickupStatus !== "picked_up") {
+        const error = new Error("يجب تأكيد استلام الطلب من مكانه قبل التسليم");
+        error.statusCode = 400;
+        throw error;
+      }
+
+      const proofType = deliveryProofType || details.deliveryProofType || "none";
+      const proofUrl = deliveryProofUrl || details.deliveryProofUrl || "";
+      const proofNote = deliveryProofNote || details.deliveryProofNote || "";
+      const receiverName = recipientName || details.recipientName || "";
+
+      if (proofType === "none" && !proofUrl && !proofNote && !receiverName) {
+        const error = new Error("إثبات تسليم الطلب أو اسم المستلم مطلوب");
+        error.statusCode = 400;
+        throw error;
+      }
+
+      request.deliveryDetails.deliveryStatus = "delivered";
+      request.deliveryDetails.deliveredAt = request.deliveryDetails.deliveredAt || new Date();
+      request.deliveryDetails.deliveryProofType = proofType;
+      request.deliveryDetails.deliveryProofUrl = proofUrl;
+      request.deliveryDetails.deliveryProofNote = proofNote;
+      request.deliveryDetails.recipientName = receiverName;
+      request.deliveryDetails.recipientPhone = recipientPhone || details.recipientPhone || "";
+      request.deliveryDetails.handoffOtp = handoffOtp || details.handoffOtp || "";
+    }
+
     request.status = "completed";
     request.completedAt = new Date();
 
@@ -2018,6 +2441,18 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     request.customerPayablePrice = roundMoney(
       Math.max(request.finalPrice - Number(request.customerDiscountAmount || 0), 0),
     );
+
+    const deliveryItemReimbursementAmount = getDeliveryItemReimbursementAmount(request);
+
+    if (request.serviceType === "delivery_order") {
+      request.deliveryDetails.itemCostReimbursementAmount =
+        deliveryItemReimbursementAmount;
+      request.deliveryDetails.customerTotalPayableToDriver = roundMoney(
+        request.customerPayablePrice + deliveryItemReimbursementAmount,
+      );
+      request.deliveryDetails.commissionableDeliveryFare = request.finalPrice;
+    }
+
     request.commissionPercent = commissionPercent;
     request.grossCommissionAmount = roundMoney(
       (request.finalPrice * commissionPercent) / 100,
@@ -2061,12 +2496,21 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     }
 
     request.financeSummary = {
-      customerPaidToDriver: request.customerPayablePrice || 0,
+      customerPaidToDriver:
+        request.serviceType === "delivery_order"
+          ? request.deliveryDetails.customerTotalPayableToDriver ||
+            request.customerPayablePrice ||
+            0
+          : request.customerPayablePrice || 0,
       appCoveredDiscountAddedToDriverBalance: request.appCoveredDiscountAmount || 0,
       grossCommissionAmount: request.grossCommissionAmount || 0,
       driverPromoDiscountAmount: request.driverPromoDiscountAmount || 0,
       netCommissionDebtAdded: request.commissionAmount || 0,
       driverNetAfterCommission: request.driverNetAmount || 0,
+      deliveryItemReimbursementAmount:
+        request.serviceType === "delivery_order"
+          ? request.deliveryDetails.itemCostReimbursementAmount || 0
+          : 0,
       recordedAt: new Date(),
     };
 
@@ -2093,6 +2537,26 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
       customerPointsEarned: loyaltyResult.customerTransaction?.points || 0,
       driverPointsEarned: loyaltyResult.driverTransaction?.points || 0,
     };
+
+    if (request.acceptedDriverAccountId) {
+      const shouldBlockDriver = !!financeResult.driverProfile?.isBlockedForDebt;
+
+      await DriverProfile.findOneAndUpdate(
+        {
+          accountId: request.acceptedDriverAccountId,
+          activeServiceRequestId: request._id,
+        },
+        {
+          activeServiceRequestId: null,
+          currentVehicleId: null,
+          isAvailable: !shouldBlockDriver,
+          ...(shouldBlockDriver ? { isOnline: false } : {}),
+        },
+        {
+          new: true,
+        },
+      );
+    }
   }
 
   if (status === "cancelled_by_customer") {
@@ -2219,6 +2683,8 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     );
   }
 
+  request.lastStatusChangedAt = new Date();
+
   await request.save();
 
   const requestForParties = await loadEnrichedRequestById({
@@ -2265,7 +2731,7 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
       emitToVehicle(request.vehicleTypeCode, "request:status-changed", payload);
     }
 
-    getIO().to("admins").emit("admin:request-status-changed", payload);
+    emitToAdmins("admin:request-status-changed", payload);
   });
 
   const responsePayload = {
@@ -2318,6 +2784,93 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
   return sendSuccess(responsePayload);
 });
 
+
+const confirmDeliveryPickup = asyncHandler(async (req, res, next) => {
+  const request = await ensureRequestExists(req.params.id);
+
+  assertDeliveryOrderRequest(request);
+  assertAcceptedDriverForRequest({ request, accountId: req.accountId });
+
+  if (request.status !== "arrived_to_pickup") {
+    const error = new Error("يجب تسجيل الوصول إلى مكان الاستلام أولا");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (request.deliveryDetails?.pickupStatus === "picked_up") {
+    const error = new Error("تم تأكيد استلام الطلب بالفعل");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const {
+    actualItemCost,
+    itemCostPaidByDriver,
+    pickupProofType,
+    pickupProofUrl,
+    pickupProofNote,
+    paymentNotes,
+  } = req.body;
+
+  const normalizedActualItemCost = roundMoney(
+    actualItemCost !== undefined
+      ? actualItemCost
+      : request.deliveryDetails?.expectedItemCost || 0,
+  );
+
+  assertDeliveryItemCostWithinLimit({
+    request,
+    actualItemCost: normalizedActualItemCost,
+  });
+
+  const responsibility = normalizeDeliveryPaymentResponsibility(
+    request.deliveryDetails || {},
+  );
+
+  request.deliveryDetails.pickupStatus = "picked_up";
+  request.deliveryDetails.pickupConfirmedAt = new Date();
+  request.deliveryDetails.actualItemCost = normalizedActualItemCost;
+  request.deliveryDetails.itemCostPaidByDriver =
+    responsibility === "driver_pays_pickup"
+      ? itemCostPaidByDriver !== false
+      : itemCostPaidByDriver === true;
+  request.deliveryDetails.itemCostConfirmedAt = new Date();
+  request.deliveryDetails.pickupProofType = pickupProofType || "note";
+  request.deliveryDetails.pickupProofUrl = pickupProofUrl || "";
+  request.deliveryDetails.pickupProofNote = pickupProofNote || "";
+  request.deliveryDetails.paymentNotes =
+    paymentNotes || request.deliveryDetails.paymentNotes || "";
+
+  await request.save();
+
+  req.body.status = "in_progress";
+
+  return updateServiceRequestStatus(req, res, next);
+});
+
+const confirmDeliveryDelivered = asyncHandler(async (req, res, next) => {
+  const request = await ensureRequestExists(req.params.id);
+
+  assertDeliveryOrderRequest(request);
+  assertAcceptedDriverForRequest({ request, accountId: req.accountId });
+
+  if (request.status !== "in_progress") {
+    const error = new Error("لا يمكن تسليم الطلب قبل تأكيد استلامه من مكانه");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (request.deliveryDetails?.deliveryStatus === "delivered") {
+    const error = new Error("تم تأكيد تسليم الطلب بالفعل");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  req.body.status = "completed";
+
+  return updateServiceRequestStatus(req, res, next);
+});
+
 module.exports = {
   createServiceRequest,
   getMyServiceRequests,
@@ -2330,4 +2883,6 @@ module.exports = {
   acceptCustomerCounterOffer,
   rejectCustomerCounterOffer,
   updateServiceRequestStatus,
+  confirmDeliveryPickup,
+  confirmDeliveryDelivered,
 };

@@ -1,6 +1,6 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
-const { emitToAccount, emitToRequest, getIO } = require('../sockets/socket.server');
+const { emitToAccount, emitToRequest, emitToAdmins, getIO } = require('../sockets/socket.server');
 const {
   getRoomForRequest,
   ensureChatRoomAccess,
@@ -107,7 +107,7 @@ const sendChatMessage = asyncHandler(async (req, res) => {
     getIO().to(`chat:${room._id}`).emit('chat:message-new', payload);
     emitToRequest(room.serviceRequestId.toString(), 'chat:message-new', payload);
     emitToAccount(message.receiverAccountId._id || message.receiverAccountId, 'chat:message-new', payload);
-    getIO().to('admins').emit('admin:chat-message-new', payload);
+    emitToAdmins('admin:chat-message-new', payload);
   });
 
   setImmediate(() => {

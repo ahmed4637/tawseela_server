@@ -197,7 +197,7 @@ const getAccountRatings = asyncHandler(async (req, res) => {
   const stats = statsResult[0];
 
   const latestReview =
-    docs.find((item) => item.comment?.toString().trim().isNotEmpty) || null;
+    docs.find((item) => item.comment?.toString().trim().length > 0) || null;
 
   return sendSuccess({
     res,

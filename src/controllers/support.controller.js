@@ -16,8 +16,8 @@ const {
 const emitAdminSupportEvent = (eventName, payload) => {
   try {
     // eslint-disable-next-line global-require
-    const { getIO } = require('../sockets/socket.server');
-    getIO().to('admins').emit(eventName, payload);
+    const { emitToAdmins } = require('../sockets/socket.server');
+    emitToAdmins(eventName, payload);
   } catch (error) {
     // Socket may be unavailable in CLI or scripts.
   }

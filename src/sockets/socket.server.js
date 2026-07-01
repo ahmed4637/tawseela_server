@@ -20,6 +20,8 @@ const { updateDriverLiveLocation } = require("../services/tracking.service");
 
 let ioInstance = null;
 
+const isDevelopment = process.env.NODE_ENV === "development";
+
 const getFirstHeaderValue = (value) => {
   if (!value) return "";
 
@@ -71,16 +73,149 @@ const getChatRoom = (roomId) => {
   return `chat:${roomId}`;
 };
 
+const normalizeSocketEventName = (eventName) => {
+  if (!eventName) return "";
+
+  return eventName
+    .toString()
+    .trim()
+    .replace(/:/g, ".")
+    .replace(/-/g, ".")
+    .replace(/\.+/g, ".")
+    .replace(/^\.|\.$/g, "");
+};
+
+const STATIC_EVENT_ALIASES = Object.freeze({
+  "socket:connected": ["socket.connected"],
+
+  "request:created": ["request.created", "customer.request.created"],
+  "request:new": ["request.available", "driver.request.available"],
+  "request:dispatched": ["request.dispatched", "scheduled_ride.request.dispatched"],
+  "request:expired": ["request.expired"],
+  "request:closed": ["request.closed"],
+  "request:removed": ["request.removed_from_driver"],
+  "request:confirmed": ["request.accepted", "trip.created", "trip.accepted"],
+  "request:status-changed": ["request.status.changed", "trip.status.changed"],
+
+  "offer:new": ["offer.created", "offer.received"],
+  "offer:accepted": ["offer.accepted"],
+  "offer:closed": ["offer.closed"],
+  "offer:countered": ["negotiation.countered", "negotiation.message.created"],
+  "offer:rejected": ["offer.rejected"],
+  "offer:counter-rejected": ["negotiation.rejected"],
+
+  "chat:room-created": ["chat.room.created"],
+  "chat:message-new": ["chat.message.received", "chat.message.created"],
+  "chat:messages-read": ["chat.message.read"],
+
+  "driver:online-status-changed": ["driver.online.status_changed"],
+  "driver:review-updated": ["driver.review.updated"],
+  "driver:location-updated": ["location.driver.updated", "tracking.location.updated"],
+
+  "notification:new": ["notification.created"],
+});
+
+const REQUEST_STATUS_EVENT_ALIASES = Object.freeze({
+  driver_arriving: ["trip.driver_on_way"],
+  arrived_to_pickup: ["trip.driver_arrived"],
+  in_progress: ["trip.started"],
+  completed: ["trip.completed"],
+  cancelled_by_customer: ["request.cancelled", "trip.cancelled"],
+  cancelled_by_driver: ["request.cancelled", "trip.cancelled"],
+  cancelled_by_admin: ["request.cancelled", "trip.cancelled"],
+  driver_no_show: ["request.no_show", "trip.driver_no_show"],
+  customer_no_show: ["request.no_show", "trip.customer_no_show"],
+  expired: ["request.expired"],
+});
+
+const getRequestFromPayload = (payload = {}) => {
+  return payload.request || payload.doc || payload.serviceRequest || null;
+};
+
+const getDynamicEventAliases = (eventName, payload = {}) => {
+  const aliases = [];
+  const request = getRequestFromPayload(payload);
+  const status = payload.status || request?.status;
+
+  if (eventName === "request:status-changed" && status) {
+    aliases.push(...(REQUEST_STATUS_EVENT_ALIASES[status] || []));
+  }
+
+  if (request?.serviceType === "delivery_order") {
+    const deliveryDetails = request.deliveryDetails || {};
+
+    if (
+      eventName === "request:status-changed" &&
+      status === "in_progress" &&
+      deliveryDetails.pickupStatus === "picked_up"
+    ) {
+      aliases.push("delivery.pickup.confirmed", "delivery.order.picked_up");
+    }
+
+    if (
+      eventName === "request:status-changed" &&
+      status === "completed" &&
+      deliveryDetails.deliveryStatus === "delivered"
+    ) {
+      aliases.push("delivery.delivered", "delivery.order.completed");
+    }
+  }
+
+  if (request?.serviceType === "scheduled_ride") {
+    if (eventName === "request:created" || eventName === "request:new") {
+      aliases.push("scheduled_ride.request.created", "scheduled_ride.request.available");
+    }
+
+    if (eventName === "request:confirmed") {
+      aliases.push("scheduled_ride.request.accepted", "scheduled_ride.trip.scheduled");
+    }
+  }
+
+  return aliases;
+};
+
+const getEventNamesToEmit = (eventName, payload) => {
+  const original = eventName?.toString().trim();
+
+  if (!original) {
+    return [];
+  }
+
+  const normalized = normalizeSocketEventName(original);
+  const aliases = [
+    original,
+    normalized,
+    ...(STATIC_EVENT_ALIASES[original] || []),
+    ...getDynamicEventAliases(original, payload),
+  ].filter(Boolean);
+
+  return [...new Set(aliases)];
+};
+
+const emitToRoom = (roomName, eventName, payload) => {
+  const eventNames = getEventNamesToEmit(eventName, payload);
+
+  for (const name of eventNames) {
+    getIO().to(roomName).emit(name, payload);
+  }
+
+  return eventNames;
+};
+
 const emitToAccount = (accountId, eventName, payload) => {
-  getIO().to(getAccountRoom(accountId)).emit(eventName, payload);
+  return emitToRoom(getAccountRoom(accountId), eventName, payload);
 };
 
 const emitToRequest = (requestId, eventName, payload) => {
-  getIO().to(getRequestRoom(requestId)).emit(eventName, payload);
+  return emitToRoom(getRequestRoom(requestId), eventName, payload);
 };
 
 const emitToVehicle = (vehicleTypeCode, eventName, payload) => {
-  getIO().to(getVehicleRoom(vehicleTypeCode)).emit(eventName, payload);
+  return emitToRoom(getVehicleRoom(vehicleTypeCode), eventName, payload);
+};
+
+const emitToAdmins = (eventName, payload) => {
+  return emitToRoom("admins", eventName, payload);
 };
 
 const authenticateSocket = async (socket, next) => {
@@ -271,12 +406,16 @@ const initSocketServer = (httpServer) => {
       }
     }
 
-    socket.emit("socket:connected", {
+    const connectedPayload = {
       success: true,
       message: "تم الاتصال باللايف بنجاح",
       accountId: socket.accountId,
       roles: socket.roles,
-    });
+    };
+
+    for (const eventName of getEventNamesToEmit("socket:connected", connectedPayload)) {
+      socket.emit(eventName, connectedPayload);
+    }
 
     socket.on("request:join", async (payload = {}, callback) => {
       try {
@@ -441,7 +580,7 @@ const initSocketServer = (httpServer) => {
           emitToAccount(receiverId, "chat:message-new", chatPayload);
         }
 
-        ioInstance.to("admins").emit("admin:chat-message-new", chatPayload);
+        emitToAdmins("admin:chat-message-new", chatPayload);
 
         if (receiverId) {
           setImmediate(async () => {
@@ -563,6 +702,17 @@ const initSocketServer = (httpServer) => {
           throw new Error("حساب السائق لم تتم الموافقة عليه بعد");
         }
 
+        const approvedVehicleCount = await DriverVehicle.countDocuments({
+          accountId: socket.accountId,
+          isActive: true,
+          isApproved: true,
+          reviewStatus: "approved",
+        });
+
+        if (approvedVehicleCount === 0) {
+          throw new Error("لا يمكن فتح Online قبل اعتماد مركبة واحدة على الأقل");
+        }
+
         driverProfile.refreshDebtBlockStatus();
 
         if (driverProfile.isBlockedForDebt) {
@@ -610,8 +760,10 @@ const initSocketServer = (httpServer) => {
           driverProfile,
         };
 
-        socket.emit("driver:online-status-changed", onlinePayload);
-        ioInstance.to("admins").emit("driver:online-status-changed", onlinePayload);
+        for (const eventName of getEventNamesToEmit("driver:online-status-changed", onlinePayload)) {
+          socket.emit(eventName, onlinePayload);
+        }
+        emitToAdmins("driver:online-status-changed", onlinePayload);
       } catch (error) {
         if (callback) {
           callback({
@@ -661,8 +813,10 @@ const initSocketServer = (httpServer) => {
           driverProfile,
         };
 
-        socket.emit("driver:online-status-changed", offlinePayload);
-        ioInstance.to("admins").emit("driver:online-status-changed", offlinePayload);
+        for (const eventName of getEventNamesToEmit("driver:online-status-changed", offlinePayload)) {
+          socket.emit(eventName, offlinePayload);
+        }
+        emitToAdmins("driver:online-status-changed", offlinePayload);
       } catch (error) {
         if (callback) {
           callback({
@@ -717,7 +871,7 @@ const initSocketServer = (httpServer) => {
         }
 
         if (settings.adminLiveTrackingEnabled) {
-          ioInstance.to("admins").emit("driver:location-updated", {
+          emitToAdmins("driver:location-updated", {
             ...locationPayload,
             activeServiceRequestId: locationPayload.serviceRequestId,
           });
@@ -759,4 +913,7 @@ module.exports = {
   emitToAccount,
   emitToRequest,
   emitToVehicle,
+  emitToAdmins,
+  emitToRoom,
+  getEventNamesToEmit,
 };

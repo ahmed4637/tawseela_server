@@ -373,6 +373,7 @@ const serviceRequestSchema = new mongoose.Schema(
         "completed",
         "cancelled_by_customer",
         "cancelled_by_driver",
+        "cancelled_by_admin",
         "expired",
         "driver_no_show",
         "customer_no_show",
@@ -383,6 +384,49 @@ const serviceRequestSchema = new mongoose.Schema(
     scheduledAt: {
       type: Date,
       default: null,
+    },
+
+    dispatchAt: {
+      type: Date,
+      default: null,
+    },
+
+    dispatchedAt: {
+      type: Date,
+      default: null,
+    },
+
+    dispatchStatus: {
+      type: String,
+      enum: [
+        "dispatched",
+        "scheduled_waiting",
+        "expired",
+        "cancelled",
+      ],
+      default: "dispatched",
+    },
+
+    requestExpiresAt: {
+      type: Date,
+      default: null,
+    },
+
+    lastDispatchAttemptAt: {
+      type: Date,
+      default: null,
+    },
+
+    dispatchAttempts: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    lastDispatchedDriversCount: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
 
     reminderStatus: {
@@ -410,6 +454,50 @@ const serviceRequestSchema = new mongoose.Schema(
         trim: true,
         default: "",
       },
+      itemCategory: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      quantity: {
+        type: Number,
+        default: 1,
+        min: 1,
+      },
+      itemDeclaredValue: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      pickupContactName: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      pickupContactPhone: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      dropoffContactName: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      dropoffContactPhone: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      itemPaymentResponsibility: {
+        type: String,
+        enum: [
+          "customer_pays_pickup",
+          "driver_pays_pickup",
+          "prepaid",
+        ],
+        default: "customer_pays_pickup",
+      },
       driverWillPayForItems: {
         type: Boolean,
         default: false,
@@ -418,6 +506,102 @@ const serviceRequestSchema = new mongoose.Schema(
         type: Number,
         default: 0,
         min: 0,
+      },
+      maxItemCostAllowed: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      actualItemCost: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      itemCostPaidByDriver: {
+        type: Boolean,
+        default: false,
+      },
+      itemCostConfirmedAt: {
+        type: Date,
+        default: null,
+      },
+      itemCostReimbursementAmount: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      customerTotalPayableToDriver: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      commissionableDeliveryFare: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      pickupStatus: {
+        type: String,
+        enum: ["pending", "picked_up"],
+        default: "pending",
+      },
+      pickupConfirmedAt: {
+        type: Date,
+        default: null,
+      },
+      pickupProofType: {
+        type: String,
+        enum: ["none", "note", "photo", "receipt"],
+        default: "none",
+      },
+      pickupProofUrl: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      pickupProofNote: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      deliveryStatus: {
+        type: String,
+        enum: ["pending", "delivered"],
+        default: "pending",
+      },
+      deliveredAt: {
+        type: Date,
+        default: null,
+      },
+      deliveryProofType: {
+        type: String,
+        enum: ["none", "note", "photo", "otp", "signature"],
+        default: "none",
+      },
+      deliveryProofUrl: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      deliveryProofNote: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      recipientName: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      recipientPhone: {
+        type: String,
+        trim: true,
+        default: "",
+      },
+      handoffOtp: {
+        type: String,
+        trim: true,
+        default: "",
       },
       paymentNotes: {
         type: String,
@@ -435,6 +619,43 @@ const serviceRequestSchema = new mongoose.Schema(
     acceptedOfferId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "ServiceOffer",
+      default: null,
+    },
+
+    confirmedAt: {
+      type: Date,
+      default: null,
+    },
+
+    driverArrivingAt: {
+      type: Date,
+      default: null,
+    },
+
+    arrivedAt: {
+      type: Date,
+      default: null,
+    },
+
+    lifecycleLockToken: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+
+    lifecycleLockReason: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    lifecycleLockedAt: {
+      type: Date,
+      default: null,
+    },
+
+    lastStatusChangedAt: {
+      type: Date,
       default: null,
     },
 
@@ -462,12 +683,20 @@ serviceRequestSchema.index({ customerAccountId: 1, createdAt: -1 });
 serviceRequestSchema.index({ acceptedDriverAccountId: 1, status: 1 });
 serviceRequestSchema.index({ serviceType: 1, status: 1, vehicleTypeCode: 1 });
 serviceRequestSchema.index({ scheduledAt: 1, status: 1 });
+serviceRequestSchema.index({ dispatchAt: 1, dispatchStatus: 1, status: 1 });
+serviceRequestSchema.index({ requestExpiresAt: 1, status: 1 });
 serviceRequestSchema.index({ pickupLocation: "2dsphere" });
 serviceRequestSchema.index({ customerPromoCodeId: 1 });
 serviceRequestSchema.index({ driverPromoCodeId: 1 });
 serviceRequestSchema.index({ driverWalletId: 1 });
 serviceRequestSchema.index({ commissionTransactionId: 1 });
+serviceRequestSchema.index({ "deliveryDetails.pickupStatus": 1, serviceType: 1 });
+serviceRequestSchema.index({ "deliveryDetails.deliveryStatus": 1, serviceType: 1 });
 serviceRequestSchema.index({ acceptedDriverAccountId: 1, completedAt: -1 });
+serviceRequestSchema.index({ lifecycleLockToken: 1 });
+serviceRequestSchema.index(
+  { _id: 1, status: 1, acceptedOfferId: 1, lifecycleLockToken: 1 },
+);
 
 serviceRequestSchema.methods.toSafeObject = function () {
   const request = this.toObject();

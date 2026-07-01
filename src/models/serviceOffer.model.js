@@ -89,6 +89,24 @@ const serviceOfferSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+    closedAt: {
+      type: Date,
+      default: null,
+    },
+
+    closedReason: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: [200, 'سبب إغلاق العرض طويل جدًا'],
+    },
+
+    closedBy: {
+      type: String,
+      enum: ['customer', 'driver', 'system', 'admin', null],
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -98,6 +116,7 @@ const serviceOfferSchema = new mongoose.Schema(
 serviceOfferSchema.index({ serviceRequestId: 1, createdAt: -1 });
 serviceOfferSchema.index({ driverAccountId: 1, status: 1 });
 serviceOfferSchema.index({ driverPromoCodeId: 1 });
+serviceOfferSchema.index({ serviceRequestId: 1, sentBy: 1, status: 1 });
 serviceOfferSchema.index(
   { serviceRequestId: 1, driverAccountId: 1, status: 1 },
   {

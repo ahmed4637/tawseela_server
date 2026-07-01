@@ -63,6 +63,73 @@ const appSettingsSchema = new mongoose.Schema(
       },
     },
 
+    scheduledRide: {
+      dispatchBeforeMinutes: {
+        // متروك للتوافق مع أي بيانات قديمة فقط.
+        // الحجز بموعد يرسل للسائقين فورًا، لذلك القيمة الافتراضية 0.
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+
+      minLeadMinutes: {
+        type: Number,
+        default: 15,
+        min: 0,
+      },
+
+      expireAfterScheduledMinutes: {
+        type: Number,
+        default: 30,
+        min: 1,
+      },
+
+      reminderToleranceMinutes: {
+        type: Number,
+        default: 5,
+        min: 1,
+      },
+    },
+
+    requestLifecycle: {
+      instantRequestExpiryMinutes: {
+        type: Number,
+        default: 15,
+        min: 1,
+      },
+
+      deliveryRequestExpiryMinutes: {
+        type: Number,
+        default: 20,
+        min: 1,
+      },
+
+      scheduledRequestExpiryAfterMinutes: {
+        type: Number,
+        default: 30,
+        min: 1,
+      },
+
+      offerExpiryMinutes: {
+        type: Number,
+        default: 5,
+        min: 1,
+      },
+
+      workerIntervalSeconds: {
+        type: Number,
+        default: 60,
+        min: 15,
+      },
+
+      cleanupBatchLimit: {
+        type: Number,
+        default: 200,
+        min: 10,
+        max: 1000,
+      },
+    },
+
     support: {
       phone: {
         type: String,

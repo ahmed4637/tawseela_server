@@ -18,8 +18,8 @@ const emitAdminComplaintEvent = (eventName, payload) => {
   try {
     // Lazy require avoids circular init issues while keeping dashboard live updates.
     // eslint-disable-next-line global-require
-    const { getIO } = require('../sockets/socket.server');
-    getIO().to('admins').emit(eventName, payload);
+    const { emitToAdmins } = require('../sockets/socket.server');
+    emitToAdmins(eventName, payload);
   } catch (error) {
     // Socket may be unavailable in CLI or during isolated controller execution.
   }

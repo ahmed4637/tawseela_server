@@ -18,6 +18,23 @@ const DEFAULT_SETTINGS = {
     tenMinutes: 10,
   },
 
+  scheduledRide: {
+    // الحجز بموعد يظهر للسائقين فورًا، والقيمة دي متروكة للتوافق القديم فقط.
+    dispatchBeforeMinutes: 0,
+    minLeadMinutes: 15,
+    expireAfterScheduledMinutes: 30,
+    reminderToleranceMinutes: 5,
+  },
+
+  requestLifecycle: {
+    instantRequestExpiryMinutes: 15,
+    deliveryRequestExpiryMinutes: 20,
+    scheduledRequestExpiryAfterMinutes: 30,
+    offerExpiryMinutes: 5,
+    workerIntervalSeconds: 60,
+    cleanupBatchLimit: 200,
+  },
+
   support: {
     phone: '',
     whatsapp: '',
@@ -103,9 +120,95 @@ const getTrackingSettings = async () => {
   };
 };
 
+
+const getScheduledRequestSettings = async () => {
+  const settings = await getAppSettings();
+  const scheduledRide = settings.scheduledRide || {};
+  const requestLifecycle = settings.requestLifecycle || {};
+  const reminders = settings.scheduledRemindersMinutes || {};
+
+  return {
+    // القرار النهائي: الحجز بموعد يرسل للسائقين فورًا بعد إنشائه.
+    dispatchBeforeMinutes: 0,
+    minLeadMinutes: Number(scheduledRide.minLeadMinutes ?? 15),
+    expireAfterScheduledMinutes: Number(
+      scheduledRide.expireAfterScheduledMinutes ??
+        requestLifecycle.scheduledRequestExpiryAfterMinutes ??
+        30,
+    ),
+    reminderToleranceMinutes: Number(scheduledRide.reminderToleranceMinutes ?? 5),
+    remindersMinutes: {
+      twoHours: Number(reminders.twoHours ?? 120),
+      oneHour: Number(reminders.oneHour ?? 60),
+      thirtyMinutes: Number(reminders.thirtyMinutes ?? 30),
+      tenMinutes: Number(reminders.tenMinutes ?? 10),
+    },
+  };
+};
+
+const getRequestLifecycleSettings = async () => {
+  const settings = await getAppSettings();
+  const lifecycle = settings.requestLifecycle || {};
+
+  return {
+    instantRequestExpiryMinutes: Number(lifecycle.instantRequestExpiryMinutes ?? 15),
+    deliveryRequestExpiryMinutes: Number(lifecycle.deliveryRequestExpiryMinutes ?? 20),
+    scheduledRequestExpiryAfterMinutes: Number(
+      lifecycle.scheduledRequestExpiryAfterMinutes ??
+        settings.scheduledRide?.expireAfterScheduledMinutes ??
+        30,
+    ),
+    offerExpiryMinutes: Number(lifecycle.offerExpiryMinutes ?? 5),
+    workerIntervalSeconds: Number(lifecycle.workerIntervalSeconds ?? 60),
+    cleanupBatchLimit: Number(lifecycle.cleanupBatchLimit ?? 200),
+  };
+};
+
+const getOfferExpiryDate = async () => {
+  const lifecycle = await getRequestLifecycleSettings();
+  return new Date(Date.now() + lifecycle.offerExpiryMinutes * 60 * 1000);
+};
+
+const buildRequestLifecycleDates = async ({ serviceType, scheduledAt = null }) => {
+  const lifecycle = await getRequestLifecycleSettings();
+  const scheduled = await getScheduledRequestSettings();
+  const now = new Date();
+
+  if (serviceType === 'scheduled_ride') {
+    const scheduledDate = new Date(scheduledAt);
+    const requestExpiresAt = new Date(
+      scheduledDate.getTime() + scheduled.expireAfterScheduledMinutes * 60 * 1000,
+    );
+
+    // القرار النهائي للحجز بموعد:
+    // الطلب يظهر للسائقين فورًا بعد إنشائه حتى يقبل سائق ويلتزم بالموعد.
+    return {
+      dispatchAt: now,
+      requestExpiresAt,
+      dispatchStatus: 'dispatched',
+      dispatchedAt: now,
+    };
+  }
+
+  const expiryMinutes = serviceType === 'delivery_order'
+    ? lifecycle.deliveryRequestExpiryMinutes
+    : lifecycle.instantRequestExpiryMinutes;
+
+  return {
+    dispatchAt: now,
+    requestExpiresAt: new Date(now.getTime() + expiryMinutes * 60 * 1000),
+    dispatchStatus: 'dispatched',
+    dispatchedAt: now,
+  };
+};
+
 module.exports = {
   getAppSettings,
   getDriverCommissionDebtLimit,
   getSearchRadiusKmByServiceType,
   getTrackingSettings,
+  getScheduledRequestSettings,
+  getRequestLifecycleSettings,
+  getOfferExpiryDate,
+  buildRequestLifecycleDates,
 };
