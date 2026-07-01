@@ -2,10 +2,12 @@ require('dotenv').config();
 
 const connectDB = require('../config/db');
 const Account = require('../models/account.model');
+const { ensureDefaultAdminRoles } = require('../services/adminAccess.service');
 
 const seedAdmin = async () => {
   try {
     await connectDB();
+    await ensureDefaultAdminRoles();
 
     const adminName = process.env.ADMIN_NAME || 'Tawseela Admin';
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@tawseela.com';
@@ -22,6 +24,8 @@ const seedAdmin = async () => {
       admin.name = adminName;
       admin.email = adminEmail;
       admin.defaultRole = 'admin';
+      admin.adminRoleKey = 'super_admin';
+      admin.isSuperAdmin = true;
       admin.isActive = true;
 
       await admin.save();
@@ -38,6 +42,8 @@ const seedAdmin = async () => {
       password: adminPassword,
       roles: ['admin'],
       defaultRole: 'admin',
+      adminRoleKey: 'super_admin',
+      isSuperAdmin: true,
       isActive: true,
     });
 

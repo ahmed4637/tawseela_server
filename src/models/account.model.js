@@ -54,6 +54,28 @@ const accountSchema = new mongoose.Schema(
       default: 'customer',
     },
 
+    adminRoleKey: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: '',
+    },
+
+    isSuperAdmin: {
+      type: Boolean,
+      default: false,
+    },
+
+    adminExtraPermissions: {
+      type: [String],
+      default: [],
+    },
+
+    adminDeniedPermissions: {
+      type: [String],
+      default: [],
+    },
+
     isActive: {
       type: Boolean,
       default: true,
@@ -84,6 +106,8 @@ accountSchema.index(
     },
   }
 );
+
+accountSchema.index({ roles: 1, adminRoleKey: 1 });
 
 accountSchema.pre('save', async function () {
   if (!this.isModified('password')) {

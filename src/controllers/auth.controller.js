@@ -10,6 +10,7 @@ const { sendSuccess } = require('../utils/apiResponse');
 const { generateToken } = require('../utils/jwt');
 const { getDriverCommissionDebtLimit } = require('../services/appSettings.service');
 const { getOrCreateLoyaltyAccount } = require('../services/loyalty.service');
+const { getEffectiveAdminAccess } = require('../services/adminAccess.service');
 const {
   buildDriverReviewStatus,
   markDriverProfileResubmitted,
@@ -119,6 +120,8 @@ const buildAccountAuthResponse = async (account) => {
 
   let driverProfile = null;
   let driverVehicles = [];
+  let adminAccess = null;
+
   const loyaltyAccount = await getOrCreateLoyaltyAccount({
     accountId: account._id,
     accountRole: account.defaultRole === 'driver' && account.roles.includes('driver') ? 'driver' : 'customer',
@@ -136,6 +139,10 @@ const buildAccountAuthResponse = async (account) => {
       isDefault: -1,
       createdAt: -1,
     });
+  }
+
+  if (account.roles.includes('admin')) {
+    adminAccess = await getEffectiveAdminAccess(account);
   }
 
   const token = generateToken({
@@ -157,7 +164,10 @@ const buildAccountAuthResponse = async (account) => {
       defaultRole: safeAccount.defaultRole,
       isActive: safeAccount.isActive,
       walletBalance: safeAccount.walletBalance,
+      adminRoleKey: safeAccount.adminRoleKey || '',
+      isSuperAdmin: safeAccount.isSuperAdmin === true,
     },
+    adminAccess,
     loyaltyAccount,
     driverProfile,
     driverVehicles,
