@@ -97,6 +97,62 @@ const appSettingsSchema = new mongoose.Schema(
       },
     },
 
+    loyalty: {
+      isEnabled: {
+        type: Boolean,
+        default: true,
+      },
+
+      customerEarnPointsPerFarePound: {
+        type: Number,
+        default: 1,
+        min: 0,
+      },
+
+      driverEarnPointsPerCompletedRequest: {
+        type: Number,
+        default: 10,
+        min: 0,
+      },
+
+      customerAfterAcceptanceCancelDeductionPoints: {
+        type: Number,
+        default: 100,
+        min: 0,
+      },
+
+      driverAfterAcceptanceCancelDeductionPoints: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+
+      allowNegativeBalance: {
+        type: Boolean,
+        default: false,
+      },
+
+      tierRules: {
+        silver: {
+          type: Number,
+          default: 500,
+          min: 0,
+        },
+
+        gold: {
+          type: Number,
+          default: 1500,
+          min: 0,
+        },
+
+        platinum: {
+          type: Number,
+          default: 5000,
+          min: 0,
+        },
+      },
+    },
+
     updatedByAdminId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Account',

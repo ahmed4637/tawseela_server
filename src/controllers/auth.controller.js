@@ -9,6 +9,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 const { generateToken } = require('../utils/jwt');
 const { getDriverCommissionDebtLimit } = require('../services/appSettings.service');
+const { getOrCreateLoyaltyAccount } = require('../services/loyalty.service');
 const normalizeEmail = (email) => {
   return email ? email.trim().toLowerCase() : '';
 };
@@ -112,6 +113,10 @@ const buildAccountAuthResponse = async (account) => {
 
   let driverProfile = null;
   let driverVehicles = [];
+  const loyaltyAccount = await getOrCreateLoyaltyAccount({
+    accountId: account._id,
+    accountRole: account.defaultRole === 'driver' && account.roles.includes('driver') ? 'driver' : 'customer',
+  });
 
   if (account.roles.includes('driver')) {
     driverProfile = await DriverProfile.findOne({
@@ -147,6 +152,7 @@ const buildAccountAuthResponse = async (account) => {
       isActive: safeAccount.isActive,
       walletBalance: safeAccount.walletBalance,
     },
+    loyaltyAccount,
     driverProfile,
     driverVehicles,
   };
@@ -334,6 +340,11 @@ const cleanLicenseImage = normalizeUploadedImagePath({
 
   account.defaultRole = 'driver';
   await account.save();
+
+  await getOrCreateLoyaltyAccount({
+    accountId: account._id,
+    accountRole: 'driver',
+  });
 
   const authData = await buildAccountAuthResponse(account);
 

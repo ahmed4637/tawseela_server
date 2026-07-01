@@ -28,6 +28,20 @@ const DEFAULT_SETTINGS = {
     isMaintenanceMode: false,
     maintenanceMessage: 'التطبيق تحت الصيانة حاليًا',
   },
+
+  loyalty: {
+    isEnabled: true,
+    customerEarnPointsPerFarePound: 1,
+    driverEarnPointsPerCompletedRequest: 10,
+    customerAfterAcceptanceCancelDeductionPoints: 100,
+    driverAfterAcceptanceCancelDeductionPoints: 0,
+    allowNegativeBalance: false,
+    tierRules: {
+      silver: 500,
+      gold: 1500,
+      platinum: 5000,
+    },
+  },
 };
 
 const getAppSettings = async () => {

@@ -15,6 +15,25 @@ const asyncHandler = require("../utils/asyncHandler");
 const { sendSuccess } = require("../utils/apiResponse");
 const { createNotification } = require("../services/notification.service");
 const {
+  createChatRoomForAcceptedRequest,
+} = require("../services/chat.service");
+const {
+  assertNoActiveRestriction,
+  getRestrictedAccountIds,
+  applyCancellationPenalty,
+} = require("../services/penalty.service");
+const {
+  awardLoyaltyForCompletedRequest,
+} = require("../services/loyalty.service");
+const {
+  validatePromoCode,
+  reserveCustomerPromoForRequest,
+  applyCustomerPromoForRequest,
+  cancelPromoReservationsForRequest,
+  reserveDriverPromoForAcceptedOffer,
+  applyDriverPromoToCommission,
+} = require("../services/promo.service");
+const {
   getIO,
   emitToAccount,
   emitToRequest,
@@ -105,7 +124,15 @@ const findNearbyDriverAccountIdsForRequest = async (request) => {
     },
   }).select("accountId");
 
-  return profiles.map((profile) => profile.accountId.toString());
+  const profileAccountIds = profiles.map((profile) => profile.accountId.toString());
+  const restrictedAccountIds = await getRestrictedAccountIds({
+    accountIds: profileAccountIds,
+    restrictionTypes: ["app_usage", "driver_online", "receiving_requests"],
+  });
+
+  return profileAccountIds.filter(
+    (accountId) => !restrictedAccountIds.has(accountId),
+  );
 };
 
 const safeSocketEmit = (callback) => {
@@ -364,6 +391,11 @@ const ensureDriverCanWork = async (accountId) => {
     throw error;
   }
 
+  await assertNoActiveRestriction({
+    accountId,
+    restrictionTypes: ["app_usage", "driver_online", "receiving_requests"],
+  });
+
   driverProfile.refreshDebtBlockStatus();
   await driverProfile.save();
 
@@ -420,11 +452,17 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     destination,
     distanceKm,
     customerOfferedPrice,
+    customerPromoCode,
     scheduledAt,
     deliveryDetails,
   } = req.body;
 
   await ensureCustomerHasNoActiveRequest(req.accountId);
+
+  await assertNoActiveRestriction({
+    accountId: req.accountId,
+    restrictionTypes: ["app_usage", "creating_requests"],
+  });
 
   const vehicle = await Vehicle.findOne({
     code: vehicleTypeCode.toString().trim().toLowerCase(),
@@ -483,6 +521,27 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  let customerPromoResult = null;
+
+  if (customerPromoCode) {
+    customerPromoResult = await validatePromoCode({
+      code: customerPromoCode,
+      promoType: "customer",
+      accountId: req.accountId,
+      serviceType,
+      vehicleTypeCode: vehicle.code,
+      amount: initialCustomerPrice,
+    });
+  }
+
+  const customerDiscountAmount = roundMoney(
+    customerPromoResult?.discountAmount || 0,
+  );
+
+  const customerPayablePrice = roundMoney(
+    Math.max(initialCustomerPrice - customerDiscountAmount, 0),
+  );
+
   const doc = await ServiceRequest.create({
     requestCode: generateRequestCode(),
     serviceType,
@@ -505,6 +564,12 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     distanceKm: Number(distanceKm) || 0,
     estimatedPrice,
     customerOfferedPrice: roundMoney(initialCustomerPrice),
+    customerPromoCodeId: customerPromoResult?.promo?._id || null,
+    customerPromoCode: customerPromoResult?.promo?.code || "",
+    customerPromoSnapshot: customerPromoResult?.snapshot || null,
+    customerDiscountAmount,
+    appCoveredDiscountAmount: customerDiscountAmount,
+    customerPayablePrice,
 
     scheduledAt: serviceType === "scheduled_ride" ? scheduledAt : null,
 
@@ -521,6 +586,16 @@ const createServiceRequest = asyncHandler(async (req, res) => {
 
     status: "pending_offers",
   });
+
+  if (customerPromoResult?.promo) {
+    await reserveCustomerPromoForRequest({
+      promo: customerPromoResult.promo,
+      accountId: req.accountId,
+      serviceRequestId: doc._id,
+      amount: initialCustomerPrice,
+      discountAmount: customerDiscountAmount,
+    });
+  }
 
   const nearbyDriverAccountIds =
     await findNearbyDriverAccountIdsForRequest(doc);
@@ -1018,7 +1093,7 @@ const createDriverOffer = asyncHandler(async (req, res) => {
 
   await ensureDriverCanWork(req.accountId);
 
-  const { driverVehicleId, offeredPrice, message } = req.body;
+  const { driverVehicleId, offeredPrice, message, driverPromoCode } = req.body;
 
   const vehicleQuery = {
     _id: driverVehicleId,
@@ -1046,6 +1121,31 @@ const createDriverOffer = asyncHandler(async (req, res) => {
     const error = new Error("السعر المعروض غير صحيح");
     error.statusCode = 400;
     throw error;
+  }
+
+  let driverPromoResult = null;
+
+  if (driverPromoCode) {
+    const vehicleForCommission = await Vehicle.findOne({
+      code: request.vehicleTypeCode,
+    });
+    const estimatedCommissionPercent = getCommissionPercent(
+      vehicleForCommission,
+      request.serviceType,
+    );
+    const estimatedCommissionAmount = roundMoney(
+      (price * estimatedCommissionPercent) / 100,
+    );
+
+    driverPromoResult = await validatePromoCode({
+      code: driverPromoCode,
+      promoType: "driver",
+      accountId: req.accountId,
+      serviceType: request.serviceType,
+      vehicleTypeCode: request.vehicleTypeCode,
+      amount: estimatedCommissionAmount,
+      includeReserved: false,
+    });
   }
 
   const pendingCustomerCounter = await ServiceOffer.findOne({
@@ -1081,6 +1181,12 @@ const createDriverOffer = asyncHandler(async (req, res) => {
     offer.driverVehicleId = driverVehicle._id;
     offer.offeredPrice = roundMoney(price);
     offer.message = message || "";
+    offer.driverPromoCodeId = driverPromoResult?.promo?._id || null;
+    offer.driverPromoCode = driverPromoResult?.promo?.code || "";
+    offer.driverPromoSnapshot = driverPromoResult?.snapshot || null;
+    offer.estimatedDriverPromoDiscountAmount = roundMoney(
+      driverPromoResult?.discountAmount || 0,
+    );
     offer.parentOfferId = pendingCustomerCounter?._id || offer.parentOfferId;
     await offer.save();
   } else {
@@ -1090,6 +1196,12 @@ const createDriverOffer = asyncHandler(async (req, res) => {
       driverVehicleId: driverVehicle._id,
       offeredPrice: roundMoney(price),
       message: message || "",
+      driverPromoCodeId: driverPromoResult?.promo?._id || null,
+      driverPromoCode: driverPromoResult?.promo?.code || "",
+      driverPromoSnapshot: driverPromoResult?.snapshot || null,
+      estimatedDriverPromoDiscountAmount: roundMoney(
+        driverPromoResult?.discountAmount || 0,
+      ),
       status: "pending",
       sentBy: "driver",
       parentOfferId: pendingCustomerCounter?._id || null,
@@ -1192,7 +1304,7 @@ const acceptOffer = asyncHandler(async (req, res) => {
 
   const commissionPercent = getCommissionPercent(vehicle, request.serviceType);
   const finalPrice = roundMoney(offer.offeredPrice);
-  const commissionAmount = roundMoney((finalPrice * commissionPercent) / 100);
+  const grossCommissionAmount = roundMoney((finalPrice * commissionPercent) / 100);
 
   const lockedDriverProfile = await DriverProfile.findOneAndUpdate(
     {
@@ -1238,10 +1350,34 @@ const acceptOffer = asyncHandler(async (req, res) => {
   request.acceptedDriverVehicleId = offer.driverVehicleId;
   request.acceptedOfferId = offer._id;
   request.finalPrice = finalPrice;
+  request.customerPayablePrice = roundMoney(
+    Math.max(finalPrice - Number(request.customerDiscountAmount || 0), 0),
+  );
   request.commissionPercent = commissionPercent;
-  request.commissionAmount = commissionAmount;
+  request.grossCommissionAmount = grossCommissionAmount;
+  request.driverPromoCodeId = offer.driverPromoCodeId || null;
+  request.driverPromoCode = offer.driverPromoCode || "";
+  request.driverPromoSnapshot = offer.driverPromoSnapshot || null;
+  request.driverPromoDiscountAmount = 0;
+  request.commissionAmount = grossCommissionAmount;
 
   await request.save();
+
+  if (offer.driverPromoCodeId) {
+    await reserveDriverPromoForAcceptedOffer({
+      promoCodeId: offer.driverPromoCodeId,
+      code: offer.driverPromoCode,
+      accountId: offer.driverAccountId,
+      serviceRequestId: request._id,
+      serviceOfferId: offer._id,
+      estimatedDiscountAmount: offer.estimatedDriverPromoDiscountAmount,
+    });
+  }
+
+  const chatRoom = await createChatRoomForAcceptedRequest({
+    request,
+    offer,
+  });
 
   const acceptedRequestForParties = await loadEnrichedRequestById({
     requestId: request._id,
@@ -1260,21 +1396,37 @@ const acceptOffer = asyncHandler(async (req, res) => {
     emitToAccount(offer.driverAccountId.toString(), "offer:accepted", {
       request: acceptedRequestForParties,
       offer: acceptedOfferForResponse,
+      chatRoom,
     });
 
     emitToAccount(request.customerAccountId.toString(), "request:confirmed", {
       request: acceptedRequestForParties,
       offer: acceptedOfferForResponse,
+      chatRoom,
     });
 
     emitToRequest(request._id.toString(), "request:confirmed", {
       request: acceptedRequestPublic,
       offer: acceptedOfferForResponse,
+      chatRoom,
+    });
+
+    emitToAccount(request.customerAccountId.toString(), "chat:room-created", {
+      requestId: request._id,
+      serviceRequestId: request._id,
+      room: chatRoom,
+    });
+
+    emitToAccount(offer.driverAccountId.toString(), "chat:room-created", {
+      requestId: request._id,
+      serviceRequestId: request._id,
+      room: chatRoom,
     });
 
     getIO().to("admins").emit("admin:request-confirmed", {
       request: acceptedRequestForParties,
       offer: acceptedOfferForResponse,
+      chatRoom,
     });
   });
 
@@ -1308,6 +1460,7 @@ const acceptOffer = asyncHandler(async (req, res) => {
     doc: {
       request: acceptedRequestForParties,
       acceptedOffer: acceptedOfferForResponse,
+      chatRoom,
     },
   });
 });
@@ -1469,7 +1622,7 @@ const acceptCustomerCounterOffer = asyncHandler(async (req, res) => {
 
   const commissionPercent = getCommissionPercent(vehicle, request.serviceType);
   const finalPrice = roundMoney(offer.offeredPrice);
-  const commissionAmount = roundMoney((finalPrice * commissionPercent) / 100);
+  const grossCommissionAmount = roundMoney((finalPrice * commissionPercent) / 100);
 
   const lockedDriverProfile = await DriverProfile.findOneAndUpdate(
     {
@@ -1515,10 +1668,34 @@ const acceptCustomerCounterOffer = asyncHandler(async (req, res) => {
   request.acceptedDriverVehicleId = offer.driverVehicleId;
   request.acceptedOfferId = offer._id;
   request.finalPrice = finalPrice;
+  request.customerPayablePrice = roundMoney(
+    Math.max(finalPrice - Number(request.customerDiscountAmount || 0), 0),
+  );
   request.commissionPercent = commissionPercent;
-  request.commissionAmount = commissionAmount;
+  request.grossCommissionAmount = grossCommissionAmount;
+  request.driverPromoCodeId = offer.driverPromoCodeId || null;
+  request.driverPromoCode = offer.driverPromoCode || "";
+  request.driverPromoSnapshot = offer.driverPromoSnapshot || null;
+  request.driverPromoDiscountAmount = 0;
+  request.commissionAmount = grossCommissionAmount;
 
   await request.save();
+
+  if (offer.driverPromoCodeId) {
+    await reserveDriverPromoForAcceptedOffer({
+      promoCodeId: offer.driverPromoCodeId,
+      code: offer.driverPromoCode,
+      accountId: offer.driverAccountId,
+      serviceRequestId: request._id,
+      serviceOfferId: offer._id,
+      estimatedDiscountAmount: offer.estimatedDriverPromoDiscountAmount,
+    });
+  }
+
+  const chatRoom = await createChatRoomForAcceptedRequest({
+    request,
+    offer,
+  });
 
   const acceptedRequestForParties = await loadEnrichedRequestById({
     requestId: request._id,
@@ -1540,22 +1717,38 @@ const acceptCustomerCounterOffer = asyncHandler(async (req, res) => {
       {
         request: acceptedRequestForParties,
         offer: acceptedOfferForResponse,
+        chatRoom,
       },
     );
 
     emitToAccount(offer.driverAccountId.toString(), "request:confirmed", {
       request: acceptedRequestForParties,
       offer: acceptedOfferForResponse,
+      chatRoom,
     });
 
     emitToRequest(request._id.toString(), "request:confirmed", {
       request: acceptedRequestPublic,
       offer: acceptedOfferForResponse,
+      chatRoom,
+    });
+
+    emitToAccount(request.customerAccountId.toString(), "chat:room-created", {
+      requestId: request._id,
+      serviceRequestId: request._id,
+      room: chatRoom,
+    });
+
+    emitToAccount(offer.driverAccountId.toString(), "chat:room-created", {
+      requestId: request._id,
+      serviceRequestId: request._id,
+      room: chatRoom,
     });
 
     getIO().to("admins").emit("admin:request-confirmed", {
       request: acceptedRequestForParties,
       offer: acceptedOfferForResponse,
+      chatRoom,
     });
   });
 
@@ -1589,6 +1782,7 @@ const acceptCustomerCounterOffer = asyncHandler(async (req, res) => {
     doc: {
       request: acceptedRequestForParties,
       acceptedOffer: acceptedOfferForResponse,
+      chatRoom,
     },
   });
 });
@@ -1728,6 +1922,8 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     finalFareNote,
   } = req.body;
 
+  const statusBeforeUpdate = request.status;
+
   const isCustomer = request.customerAccountId.toString() === req.accountId;
   const isAcceptedDriver =
     request.acceptedDriverAccountId?.toString() === req.accountId;
@@ -1784,6 +1980,8 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  let penaltyResult = null;
+
   if (status === "driver_arriving") {
     request.status = "driver_arriving";
   }
@@ -1827,8 +2025,11 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
 
     request.finalPrice = finalFare.finalPrice;
     request.finalFareDetails = finalFare.details;
+    request.customerPayablePrice = roundMoney(
+      Math.max(request.finalPrice - Number(request.customerDiscountAmount || 0), 0),
+    );
     request.commissionPercent = commissionPercent;
-    request.commissionAmount = roundMoney(
+    request.grossCommissionAmount = roundMoney(
       (request.finalPrice * commissionPercent) / 100,
     );
 
@@ -1836,6 +2037,31 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
       serviceRequestId: request._id,
       type: "commission",
     });
+
+    let driverPromoApplication = {
+      discountAmount: 0,
+      netCommissionAmount: request.grossCommissionAmount,
+    };
+
+    if (!existingCommission && request.acceptedOfferId) {
+      const acceptedOffer = await ServiceOffer.findById(request.acceptedOfferId);
+      driverPromoApplication = await applyDriverPromoToCommission({
+        request,
+        offer: acceptedOffer,
+        grossCommissionAmount: request.grossCommissionAmount,
+      });
+    }
+
+    request.driverPromoDiscountAmount = roundMoney(
+      driverPromoApplication.discountAmount || 0,
+    );
+    request.commissionAmount = roundMoney(
+      driverPromoApplication.netCommissionAmount,
+    );
+
+    if (!existingCommission) {
+      await applyCustomerPromoForRequest({ serviceRequestId: request._id });
+    }
 
     if (!existingCommission && request.commissionAmount > 0) {
       await CommissionTransaction.create({
@@ -1847,7 +2073,9 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
         commissionPercent: request.commissionPercent,
         amount: request.commissionAmount,
         status: "unpaid",
-        notes: "عمولة مستحقة بعد إتمام الطلب",
+        notes: request.driverPromoDiscountAmount > 0
+          ? `عمولة مستحقة بعد خصم كوبون السائق بقيمة ${request.driverPromoDiscountAmount} جنيه`
+          : "عمولة مستحقة بعد إتمام الطلب",
       });
     }
 
@@ -1881,18 +2109,47 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
         );
       });
     }
+
+    const loyaltyResult = !existingCommission
+      ? await awardLoyaltyForCompletedRequest({ request })
+      : { customerTransaction: null, driverTransaction: null };
+
+    request.loyaltySummary = {
+      customerPointsEarned: loyaltyResult.customerTransaction?.points || 0,
+      driverPointsEarned: loyaltyResult.driverTransaction?.points || 0,
+    };
   }
 
   if (status === "cancelled_by_customer") {
     request.status = "cancelled_by_customer";
     request.cancellationReason = cancellationReason || "";
     request.cancelledAt = new Date();
+
+    penaltyResult = await applyCancellationPenalty({
+      request,
+      actorType: "customer",
+      accountId: request.customerAccountId,
+      reason: cancellationReason || "إلغاء الطلب من العميل",
+      statusBeforeCancellation: statusBeforeUpdate,
+      createdBy: req.roles?.includes("admin") ? "admin" : "system",
+      adminId: req.roles?.includes("admin") ? req.accountId : null,
+    });
   }
 
   if (status === "cancelled_by_driver") {
     request.status = "cancelled_by_driver";
     request.cancellationReason = cancellationReason || "";
     request.cancelledAt = new Date();
+
+    penaltyResult = await applyCancellationPenalty({
+      request,
+      actorType: "driver",
+      accountId: request.acceptedDriverAccountId || req.accountId,
+      reason: cancellationReason || "إلغاء الطلب من السائق",
+      statusBeforeCancellation: statusBeforeUpdate,
+      createdBy: req.roles?.includes("admin") ? "admin" : "system",
+      adminId: req.roles?.includes("admin") ? req.accountId : null,
+    });
   }
 
   if (status === "driver_no_show") {
@@ -1907,6 +2164,18 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     request.status = "driver_no_show";
     request.cancellationReason = cancellationReason || "السائق لم يحضر";
     request.cancelledAt = new Date();
+
+    if (request.acceptedDriverAccountId) {
+      penaltyResult = await applyCancellationPenalty({
+        request,
+        actorType: "driver",
+        accountId: request.acceptedDriverAccountId,
+        reason: cancellationReason || "السائق لم يحضر",
+        statusBeforeCancellation: statusBeforeUpdate,
+        createdBy: req.roles?.includes("admin") ? "admin" : "system",
+        adminId: req.roles?.includes("admin") ? req.accountId : null,
+      });
+    }
   }
 
   if (status === "customer_no_show") {
@@ -1921,6 +2190,29 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     request.status = "customer_no_show";
     request.cancellationReason = cancellationReason || "العميل لم يحضر";
     request.cancelledAt = new Date();
+
+    penaltyResult = await applyCancellationPenalty({
+      request,
+      actorType: "customer",
+      accountId: request.customerAccountId,
+      reason: cancellationReason || "العميل لم يحضر",
+      statusBeforeCancellation: statusBeforeUpdate,
+      createdBy: req.roles?.includes("admin") ? "admin" : "system",
+      adminId: req.roles?.includes("admin") ? req.accountId : null,
+    });
+  }
+
+  if (
+    [
+      "cancelled_by_customer",
+      "cancelled_by_driver",
+      "driver_no_show",
+      "customer_no_show",
+    ].includes(status)
+  ) {
+    await cancelPromoReservationsForRequest({
+      serviceRequestId: request._id,
+    });
   }
 
   if (
@@ -1932,6 +2224,10 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     ].includes(status) &&
     request.acceptedDriverAccountId
   ) {
+    const driverPenaltyApplied =
+      penaltyResult?.applied &&
+      penaltyResult.penalty?.accountRole === "driver";
+
     await DriverProfile.findOneAndUpdate(
       {
         accountId: request.acceptedDriverAccountId,
@@ -1939,7 +2235,8 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
       },
       {
         activeServiceRequestId: null,
-        isAvailable: true,
+        isAvailable: !driverPenaltyApplied,
+        ...(driverPenaltyApplied ? { isOnline: false } : {}),
       },
       {
         new: true,
@@ -1958,6 +2255,14 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     const payload = {
       request: requestForParties,
       status: request.status,
+      penalty: penaltyResult?.applied
+        ? {
+            penaltyId: penaltyResult.penalty?._id,
+            blockUntil: penaltyResult.penalty?.blockUntil,
+            blockMinutes: penaltyResult.penalty?.blockMinutes,
+            phase: penaltyResult.phase,
+          }
+        : null,
     };
 
     emitToRequest(request._id.toString(), "request:status-changed", payload);
@@ -1992,6 +2297,17 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     res,
     message: "تم تحديث حالة الطلب بنجاح",
     doc: requestForParties,
+    extra: {
+      penalty: penaltyResult?.applied
+        ? {
+            penaltyId: penaltyResult.penalty?._id,
+            blockUntil: penaltyResult.penalty?.blockUntil,
+            blockMinutes: penaltyResult.penalty?.blockMinutes,
+            phase: penaltyResult.phase,
+            restrictions: penaltyResult.restrictions || [],
+          }
+        : null,
+    },
   };
 
   const statusNotifications = buildStatusNotifications(request);

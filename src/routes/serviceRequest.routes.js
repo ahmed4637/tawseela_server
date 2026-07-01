@@ -95,6 +95,11 @@ router.post(
       .isFloat({ min: 1 })
       .withMessage('السعر المعروض من العميل غير صحيح'),
 
+    body('customerPromoCode')
+      .optional({ checkFalsy: true })
+      .trim()
+      .isLength({ max: 40 })
+      .withMessage('كود كوبون العميل طويل جدًا'),
 
     body('scheduledAt')
       .optional({ checkFalsy: true })
@@ -162,6 +167,12 @@ router.post(
       .trim()
       .isLength({ max: 500 })
       .withMessage('رسالة العرض طويلة جدًا'),
+
+    body('driverPromoCode')
+      .optional({ checkFalsy: true })
+      .trim()
+      .isLength({ max: 40 })
+      .withMessage('كود كوبون السائق طويل جدًا'),
   ],
   validateRequest,
   createDriverOffer

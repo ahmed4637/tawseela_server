@@ -14,6 +14,7 @@ const getPublicSettings = asyncHandler(async (req, res) => {
       searchRadiusKm: settings.searchRadiusKm,
       support: settings.support,
       appStatus: settings.appStatus,
+      loyalty: settings.loyalty,
     },
   });
 });
@@ -35,6 +36,7 @@ const updateAdminSettings = asyncHandler(async (req, res) => {
     scheduledRemindersMinutes,
     support,
     appStatus,
+    loyalty,
     reason,
   } = req.body;
 
@@ -70,6 +72,17 @@ const updateAdminSettings = asyncHandler(async (req, res) => {
     settings.appStatus = {
       ...settings.appStatus,
       ...appStatus,
+    };
+  }
+
+  if (loyalty) {
+    settings.loyalty = {
+      ...settings.loyalty,
+      ...loyalty,
+      tierRules: {
+        ...settings.loyalty?.tierRules,
+        ...(loyalty.tierRules || {}),
+      },
     };
   }
 

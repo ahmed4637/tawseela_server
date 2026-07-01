@@ -6,6 +6,16 @@ const Account = require("../models/account.model");
 const DriverProfile = require("../models/driverProfile.model");
 const DriverVehicle = require("../models/driverVehicle.model");
 const ServiceRequest = require("../models/serviceRequest.model");
+const {
+  getRoomForRequest,
+  ensureChatRoomAccess,
+  createChatMessage,
+  markRoomMessagesAsRead,
+} = require("../services/chat.service");
+const {
+  assertNoActiveRestriction,
+  getActiveRestrictions,
+} = require("../services/penalty.service");
 
 let ioInstance = null;
 
@@ -56,6 +66,10 @@ const getRequestRoom = (requestId) => {
 
 const getVehicleRoom = (vehicleTypeCode) => {
   return `vehicle:${vehicleTypeCode}`;
+};
+
+const getChatRoom = (roomId) => {
+  return `chat:${roomId}`;
 };
 
 const emitToAccount = (accountId, eventName, payload) => {
@@ -184,6 +198,15 @@ const canJoinRequestRoom = async ({ socket, requestId }) => {
   }
 
   driverProfile.refreshDebtBlockStatus();
+
+  const activeRestrictions = await getActiveRestrictions({
+    accountId: socket.accountId,
+    restrictionTypes: ["app_usage", "driver_online", "receiving_requests"],
+  });
+
+  if (activeRestrictions.length > 0) {
+    return false;
+  }
 
   if (
     !driverProfile.isActive ||
@@ -326,6 +349,166 @@ const initSocketServer = (httpServer) => {
       }
     });
 
+    socket.on("chat:join", async (payload = {}, callback) => {
+      try {
+        const roomId = (payload.roomId || "").toString().trim();
+        const serviceRequestId = (
+          payload.serviceRequestId ||
+          payload.requestId ||
+          payload.rideId ||
+          ""
+        )
+          .toString()
+          .trim();
+
+        let room = null;
+
+        if (roomId) {
+          room = await ensureChatRoomAccess({
+            roomId,
+            accountId: socket.accountId,
+            roles: socket.roles || [],
+          });
+        } else if (serviceRequestId) {
+          room = await getRoomForRequest({
+            serviceRequestId,
+            accountId: socket.accountId,
+            roles: socket.roles || [],
+          });
+        } else {
+          throw new Error("رقم غرفة الشات أو الطلب مطلوب");
+        }
+
+        socket.join(getChatRoom(room._id));
+
+        if (callback) {
+          callback({
+            success: true,
+            message: "تم الدخول إلى غرفة الشات",
+            room,
+          });
+        }
+      } catch (error) {
+        if (callback) {
+          callback({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    });
+
+    socket.on("chat:leave", (payload = {}, callback) => {
+      const roomId = (payload.roomId || "").toString().trim();
+
+      if (roomId) {
+        socket.leave(getChatRoom(roomId));
+      }
+
+      if (callback) {
+        callback({
+          success: true,
+          message: "تم الخروج من غرفة الشات",
+        });
+      }
+    });
+
+    socket.on("chat:send", async (payload = {}, callback) => {
+      try {
+        const roomId = (payload.roomId || "").toString().trim();
+
+        if (!roomId) {
+          throw new Error("رقم غرفة الشات مطلوب");
+        }
+
+        const { room, message } = await createChatMessage({
+          roomId,
+          senderAccountId: socket.accountId,
+          messageType: payload.messageType,
+          text: payload.text,
+          mediaUrl: payload.mediaUrl,
+          location: payload.location,
+        });
+
+        const receiverId = (
+          message.receiverAccountId?._id || message.receiverAccountId || ""
+        ).toString();
+
+        const chatPayload = {
+          room,
+          message,
+          serviceRequestId: room.serviceRequestId,
+          requestId: room.serviceRequestId,
+        };
+
+        ioInstance.to(getChatRoom(room._id)).emit("chat:message-new", chatPayload);
+        emitToRequest(room.serviceRequestId.toString(), "chat:message-new", chatPayload);
+
+        if (receiverId) {
+          emitToAccount(receiverId, "chat:message-new", chatPayload);
+        }
+
+        ioInstance.to("admins").emit("admin:chat-message-new", chatPayload);
+
+        if (callback) {
+          callback({
+            success: true,
+            message: "تم إرسال الرسالة بنجاح",
+            doc: message,
+            room,
+          });
+        }
+      } catch (error) {
+        if (callback) {
+          callback({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    });
+
+    socket.on("chat:read", async (payload = {}, callback) => {
+      try {
+        const roomId = (payload.roomId || "").toString().trim();
+
+        if (!roomId) {
+          throw new Error("رقم غرفة الشات مطلوب");
+        }
+
+        const { room, modifiedCount } = await markRoomMessagesAsRead({
+          roomId,
+          accountId: socket.accountId,
+          roles: socket.roles || [],
+        });
+
+        const readPayload = {
+          roomId: room._id,
+          serviceRequestId: room.serviceRequestId,
+          readerAccountId: socket.accountId,
+          modifiedCount,
+        };
+
+        ioInstance.to(getChatRoom(room._id)).emit("chat:messages-read", readPayload);
+        emitToRequest(room.serviceRequestId.toString(), "chat:messages-read", readPayload);
+
+        if (callback) {
+          callback({
+            success: true,
+            message: "تم تعليم رسائل الشات كمقروءة",
+            modifiedCount,
+          });
+        }
+      } catch (error) {
+        if (callback) {
+          callback({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+    });
+
     socket.on("driver:go-online", async (payload = {}, callback) => {
       try {
         if (!socket.roles.includes("driver")) {
@@ -351,6 +534,17 @@ const initSocketServer = (httpServer) => {
 
         if (!driverProfile) {
           throw new Error("ملف السائق غير موجود");
+        }
+
+        await assertNoActiveRestriction({
+          accountId: socket.accountId,
+          restrictionTypes: ["app_usage", "driver_online", "receiving_requests"],
+        });
+
+        if (!isDevelopment) {
+          if (!driverProfile.isApproved || driverProfile.reviewStatus !== "approved") {
+            throw new Error("حساب السائق لم تتم الموافقة عليه بعد");
+          }
         }
 
         driverProfile.refreshDebtBlockStatus();
@@ -586,6 +780,7 @@ module.exports = {
   getAccountRoom,
   getRequestRoom,
   getVehicleRoom,
+  getChatRoom,
   emitToAccount,
   emitToRequest,
   emitToVehicle,

@@ -130,6 +130,42 @@ const serviceRequestSchema = new mongoose.Schema(
       min: 0,
     },
 
+    customerPromoCodeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "PromoCode",
+      default: null,
+    },
+
+    customerPromoCode: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: "",
+    },
+
+    customerPromoSnapshot: {
+      type: Object,
+      default: null,
+    },
+
+    customerDiscountAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    appCoveredDiscountAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    customerPayablePrice: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
     finalPrice: {
       type: Number,
       default: null,
@@ -209,10 +245,53 @@ const serviceRequestSchema = new mongoose.Schema(
       max: 100,
     },
 
+    grossCommissionAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    driverPromoCodeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "PromoCode",
+      default: null,
+    },
+
+    driverPromoCode: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: "",
+    },
+
+    driverPromoSnapshot: {
+      type: Object,
+      default: null,
+    },
+
+    driverPromoDiscountAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
     commissionAmount: {
       type: Number,
       default: 0,
       min: 0,
+    },
+
+    loyaltySummary: {
+      customerPointsEarned: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      driverPointsEarned: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
     },
 
     paymentMethod: {
@@ -323,6 +402,8 @@ serviceRequestSchema.index({ acceptedDriverAccountId: 1, status: 1 });
 serviceRequestSchema.index({ serviceType: 1, status: 1, vehicleTypeCode: 1 });
 serviceRequestSchema.index({ scheduledAt: 1, status: 1 });
 serviceRequestSchema.index({ pickupLocation: "2dsphere" });
+serviceRequestSchema.index({ customerPromoCodeId: 1 });
+serviceRequestSchema.index({ driverPromoCodeId: 1 });
 
 serviceRequestSchema.methods.toSafeObject = function () {
   const request = this.toObject();

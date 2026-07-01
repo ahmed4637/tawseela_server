@@ -33,6 +33,30 @@ const serviceOfferSchema = new mongoose.Schema(
       maxlength: [500, 'رسالة العرض طويلة جدًا'],
     },
 
+    driverPromoCodeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PromoCode',
+      default: null,
+    },
+
+    driverPromoCode: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: '',
+    },
+
+    driverPromoSnapshot: {
+      type: Object,
+      default: null,
+    },
+
+    estimatedDriverPromoDiscountAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
     status: {
       type: String,
       enum: ['pending', 'accepted', 'rejected', 'cancelled', 'expired'],
@@ -73,6 +97,7 @@ const serviceOfferSchema = new mongoose.Schema(
 
 serviceOfferSchema.index({ serviceRequestId: 1, createdAt: -1 });
 serviceOfferSchema.index({ driverAccountId: 1, status: 1 });
+serviceOfferSchema.index({ driverPromoCodeId: 1 });
 serviceOfferSchema.index(
   { serviceRequestId: 1, driverAccountId: 1, status: 1 },
   {
