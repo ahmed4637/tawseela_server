@@ -122,7 +122,7 @@ const driverProfileSchema = new mongoose.Schema(
 
     reviewStatus: {
       type: String,
-      enum: ['pending', 'approved', 'rejected'],
+      enum: ['pending', 'approved', 'rejected', 'needs_update'],
       default: 'pending',
     },
 
@@ -137,6 +137,17 @@ const driverProfileSchema = new mongoose.Schema(
       default: null,
     },
 
+    reviewedAt: {
+      type: Date,
+      default: null,
+    },
+
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Account',
+      default: null,
+    },
+
     lastOnlineAt: {
       type: Date,
       default: null,
@@ -146,6 +157,8 @@ const driverProfileSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+driverProfileSchema.index({ reviewStatus: 1, createdAt: -1 });
 
 driverProfileSchema.index({
   isApproved: 1,

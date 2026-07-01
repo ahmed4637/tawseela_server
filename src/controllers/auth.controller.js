@@ -10,6 +10,12 @@ const { sendSuccess } = require('../utils/apiResponse');
 const { generateToken } = require('../utils/jwt');
 const { getDriverCommissionDebtLimit } = require('../services/appSettings.service');
 const { getOrCreateLoyaltyAccount } = require('../services/loyalty.service');
+const {
+  buildDriverReviewStatus,
+  markDriverProfileResubmitted,
+  markDriverVehicleResubmitted,
+  createReviewLog,
+} = require('../services/driverReview.service');
 const normalizeEmail = (email) => {
   return email ? email.trim().toLowerCase() : '';
 };
@@ -316,6 +322,40 @@ const cleanLicenseImage = normalizeUploadedImagePath({
       commissionDebt: 0,
       commissionDebtLimit: await getDriverCommissionDebtLimit(),
     });
+
+    await createReviewLog({
+      entityType: 'driver_profile',
+      driverProfileId: driverProfile._id,
+      accountId: account._id,
+      action: 'submitted',
+      oldReviewStatus: '',
+      newReviewStatus: 'pending',
+      reason: 'إرسال طلب الانضمام كسائق للمراجعة',
+      source: 'driver_app',
+    });
+  } else if (['rejected', 'needs_update'].includes(driverProfile.reviewStatus)) {
+    driverProfile.nationalIdImage = cleanNationalIdImage || driverProfile.nationalIdImage;
+    driverProfile.profileImage = cleanProfileImage || driverProfile.profileImage;
+    driverProfile.isApproved = false;
+    driverProfile.reviewStatus = 'pending';
+    driverProfile.rejectionReason = '';
+    driverProfile.approvedAt = null;
+    driverProfile.reviewedAt = null;
+    driverProfile.reviewedBy = null;
+    driverProfile.isOnline = false;
+    driverProfile.isAvailable = false;
+    await driverProfile.save();
+
+    await createReviewLog({
+      entityType: 'driver_profile',
+      driverProfileId: driverProfile._id,
+      accountId: account._id,
+      action: 'resubmitted',
+      oldReviewStatus: 'rejected_or_needs_update',
+      newReviewStatus: 'pending',
+      reason: 'إعادة إرسال بيانات السائق للمراجعة',
+      source: 'driver_app',
+    });
   }
 
   const driverVehicle = await DriverVehicle.create({
@@ -332,6 +372,18 @@ const cleanLicenseImage = normalizeUploadedImagePath({
     isApproved: false,
     reviewStatus: 'pending',
     isDefault: true,
+  });
+
+  await createReviewLog({
+    entityType: 'driver_vehicle',
+    driverProfileId: driverProfile._id,
+    driverVehicleId: driverVehicle._id,
+    accountId: account._id,
+    action: 'submitted',
+    oldReviewStatus: '',
+    newReviewStatus: 'pending',
+    reason: 'إرسال مركبة للمراجعة',
+    source: 'driver_app',
   });
 
   if (!account.roles.includes('driver')) {
@@ -410,6 +462,20 @@ const cleanLicenseImage = normalizeUploadedImagePath({
     isApproved: false,
     reviewStatus: 'pending',
     isDefault: isDefault === true,
+  });
+
+  const driverProfile = await DriverProfile.findOne({ accountId: req.account._id });
+
+  await createReviewLog({
+    entityType: 'driver_vehicle',
+    driverProfileId: driverProfile?._id || null,
+    driverVehicleId: vehicle._id,
+    accountId: req.account._id,
+    action: 'submitted',
+    oldReviewStatus: '',
+    newReviewStatus: 'pending',
+    reason: 'إضافة مركبة جديدة للمراجعة',
+    source: 'driver_app',
   });
 
   if (isDefault === true) {
@@ -539,7 +605,15 @@ validatePlateNumberByVehicle({
   vehicleTypeCode: vehicle.vehicleTypeCode,
   plateNumber: vehicle.plateNumber,
 });
-  await vehicle.save();
+
+  if (['rejected', 'needs_update'].includes(vehicle.reviewStatus)) {
+    await markDriverVehicleResubmitted({
+      vehicle,
+      reason: 'تعديل بيانات المركبة وإعادة إرسالها للمراجعة',
+    });
+  } else {
+    await vehicle.save();
+  }
 
   const authData = await buildAccountAuthResponse(req.account);
 
@@ -665,6 +739,32 @@ const updateMe = asyncHandler(async (req, res) => {
   });
 });
 
+
+const getDriverReviewStatus = asyncHandler(async (req, res) => {
+  const status = await buildDriverReviewStatus(req.account._id);
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب حالة مراجعة السائق بنجاح',
+    doc: status,
+  });
+});
+
+const resubmitDriverReview = asyncHandler(async (req, res) => {
+  await markDriverProfileResubmitted({
+    accountId: req.account._id,
+    reason: req.body.reason || 'إعادة إرسال بيانات السائق للمراجعة',
+  });
+
+  const status = await buildDriverReviewStatus(req.account._id);
+
+  return sendSuccess({
+    res,
+    message: 'تم إرسال بيانات السائق للمراجعة مرة أخرى',
+    doc: status,
+  });
+});
+
 const getMe = asyncHandler(async (req, res) => {
   const authData = await buildAccountAuthResponse(req.account);
 
@@ -682,6 +782,8 @@ module.exports = {
   addDriverVehicle,
   updateDriverVehicle,
   switchRole,
+  getDriverReviewStatus,
+  resubmitDriverReview,
   getMe,
   updateMe,
 };

@@ -20,8 +20,6 @@ const { updateDriverLiveLocation } = require("../services/tracking.service");
 
 let ioInstance = null;
 
-const isDevelopment = process.env.NODE_ENV === "development";
-
 const getFirstHeaderValue = (value) => {
   if (!value) return "";
 
@@ -139,10 +137,8 @@ const joinDriverVehicleRooms = async (socket) => {
     isActive: true,
   };
 
-  if (!isDevelopment) {
-    vehicleQuery.isApproved = true;
-    vehicleQuery.reviewStatus = "approved";
-  }
+  vehicleQuery.isApproved = true;
+  vehicleQuery.reviewStatus = "approved";
 
   const driverVehicles = await DriverVehicle.find(vehicleQuery);
 
@@ -220,13 +216,11 @@ const canJoinRequestRoom = async ({ socket, requestId }) => {
     return false;
   }
 
-  if (!isDevelopment) {
-    if (
-      !driverProfile.isApproved ||
-      driverProfile.reviewStatus !== "approved"
-    ) {
-      return false;
-    }
+  if (
+    !driverProfile.isApproved ||
+    driverProfile.reviewStatus !== "approved"
+  ) {
+    return false;
   }
 
   const vehicleQuery = {
@@ -235,10 +229,8 @@ const canJoinRequestRoom = async ({ socket, requestId }) => {
     vehicleTypeCode: request.vehicleTypeCode,
   };
 
-  if (!isDevelopment) {
-    vehicleQuery.isApproved = true;
-    vehicleQuery.reviewStatus = "approved";
-  }
+  vehicleQuery.isApproved = true;
+  vehicleQuery.reviewStatus = "approved";
 
   const matchingVehicle = await DriverVehicle.exists(vehicleQuery);
 
@@ -567,10 +559,8 @@ const initSocketServer = (httpServer) => {
           restrictionTypes: ["app_usage", "driver_online", "receiving_requests"],
         });
 
-        if (!isDevelopment) {
-          if (!driverProfile.isApproved || driverProfile.reviewStatus !== "approved") {
-            throw new Error("حساب السائق لم تتم الموافقة عليه بعد");
-          }
+        if (!driverProfile.isApproved || driverProfile.reviewStatus !== "approved") {
+          throw new Error("حساب السائق لم تتم الموافقة عليه بعد");
         }
 
         driverProfile.refreshDebtBlockStatus();

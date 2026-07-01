@@ -91,7 +91,7 @@ const driverVehicleSchema = new mongoose.Schema(
 
     reviewStatus: {
       type: String,
-      enum: ['pending', 'approved', 'rejected'],
+      enum: ['pending', 'approved', 'rejected', 'needs_update'],
       default: 'pending',
     },
 
@@ -103,6 +103,17 @@ const driverVehicleSchema = new mongoose.Schema(
 
     approvedAt: {
       type: Date,
+      default: null,
+    },
+
+    reviewedAt: {
+      type: Date,
+      default: null,
+    },
+
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Account',
       default: null,
     },
   },
@@ -125,6 +136,7 @@ driverVehicleSchema.pre('validate', function () {
 });
 
 driverVehicleSchema.index({ accountId: 1, isActive: 1 });
+driverVehicleSchema.index({ reviewStatus: 1, createdAt: -1 });
 driverVehicleSchema.index({ accountId: 1, vehicleTypeCode: 1, plateNumber: 1 });
 
 driverVehicleSchema.methods.toSafeObject = function () {

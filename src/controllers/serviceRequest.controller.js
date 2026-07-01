@@ -42,8 +42,6 @@ const {
   emitToVehicle,
 } = require("../sockets/socket.server");
 
-const isDevelopment = process.env.NODE_ENV === "development";
-
 const isValidObjectId = (id) => {
   return mongoose.Types.ObjectId.isValid(id);
 };
@@ -90,10 +88,8 @@ const findNearbyDriverAccountIdsForRequest = async (request) => {
     isActive: true,
   };
 
-  if (!isDevelopment) {
-    vehicleQuery.isApproved = true;
-    vehicleQuery.reviewStatus = "approved";
-  }
+  vehicleQuery.isApproved = true;
+  vehicleQuery.reviewStatus = "approved";
 
   const driverVehicles =
     await DriverVehicle.find(vehicleQuery).select("accountId");
@@ -401,21 +397,19 @@ const ensureDriverCanWork = async (accountId) => {
   driverProfile.refreshDebtBlockStatus();
   await driverProfile.save();
 
-  if (!isDevelopment) {
-    if (
-      !driverProfile.isApproved ||
-      driverProfile.reviewStatus !== "approved"
-    ) {
-      const error = new Error("حساب السائق لم تتم الموافقة عليه بعد");
-      error.statusCode = 403;
-      throw error;
-    }
+  if (
+    !driverProfile.isApproved ||
+    driverProfile.reviewStatus !== "approved"
+  ) {
+    const error = new Error("حساب السائق لم تتم الموافقة عليه بعد");
+    error.statusCode = 403;
+    throw error;
+  }
 
-    if (!driverProfile.isOnline) {
-      const error = new Error("يجب أن يكون السائق Online لاستقبال الطلبات");
-      error.statusCode = 403;
-      throw error;
-    }
+  if (!driverProfile.isOnline) {
+    const error = new Error("يجب أن يكون السائق Online لاستقبال الطلبات");
+    error.statusCode = 403;
+    throw error;
   }
 
   if (driverProfile.isBlockedForDebt) {
@@ -697,10 +691,8 @@ const getAvailableServiceRequestsForDriver = asyncHandler(async (req, res) => {
     isActive: true,
   };
 
-  if (!isDevelopment) {
-    vehicleQuery.isApproved = true;
-    vehicleQuery.reviewStatus = "approved";
-  }
+  vehicleQuery.isApproved = true;
+  vehicleQuery.reviewStatus = "approved";
 
   const driverVehicles = await DriverVehicle.find(vehicleQuery);
 
@@ -956,10 +948,8 @@ const canDriverViewOpenRequest = async ({ accountId, request }) => {
     vehicleTypeCode: request.vehicleTypeCode,
   };
 
-  if (!isDevelopment) {
-    vehicleQuery.isApproved = true;
-    vehicleQuery.reviewStatus = "approved";
-  }
+  vehicleQuery.isApproved = true;
+  vehicleQuery.reviewStatus = "approved";
 
   const matchingVehicle = await DriverVehicle.exists(vehicleQuery);
 
@@ -1104,10 +1094,8 @@ const createDriverOffer = asyncHandler(async (req, res) => {
     vehicleTypeCode: request.vehicleTypeCode,
   };
 
-  if (!isDevelopment) {
-    vehicleQuery.isApproved = true;
-    vehicleQuery.reviewStatus = "approved";
-  }
+  vehicleQuery.isApproved = true;
+  vehicleQuery.reviewStatus = "approved";
 
   const driverVehicle = await DriverVehicle.findOne(vehicleQuery);
 

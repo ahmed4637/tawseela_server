@@ -7,6 +7,8 @@ const {
   addDriverVehicle,
   updateDriverVehicle,
   switchRole,
+  getDriverReviewStatus,
+  resubmitDriverReview,
   getMe,
   updateMe,
 } = require('../controllers/auth.controller');
@@ -269,6 +271,21 @@ router.put(
   ],
   validateRequest,
   updateDriverVehicle
+);
+
+
+router.get('/driver-review/status', protect, getDriverReviewStatus);
+
+router.post(
+  '/driver-review/resubmit',
+  protect,
+  [
+    body('reason')
+      .optional({ checkFalsy: true })
+      .trim(),
+  ],
+  validateRequest,
+  resubmitDriverReview
 );
 
 router.post(

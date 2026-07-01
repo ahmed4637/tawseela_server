@@ -11,6 +11,12 @@ const DriverPayment = require('../models/driverPayment.model');
 const Vehicle = require('../models/vehicle.model');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
+const {
+  approveDriverProfile: approveDriverProfileReview,
+  rejectOrRequestUpdateDriverProfile,
+  approveDriverVehicle: approveDriverVehicleReview,
+  rejectOrRequestUpdateDriverVehicle,
+} = require('../services/driverReview.service');
 
 const isValidObjectId = (id) => {
   return mongoose.Types.ObjectId.isValid(id);
@@ -439,21 +445,11 @@ const approveDriverProfile = asyncHandler(async (req, res) => {
 
   ensureValidId(driverProfileId, 'رقم ملف السائق غير صحيح');
 
-  const doc = await DriverProfile.findById(driverProfileId);
-
-  if (!doc) {
-    const error = new Error('ملف السائق غير موجود');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  doc.isApproved = true;
-  doc.reviewStatus = 'approved';
-  doc.rejectionReason = '';
-  doc.approvedAt = new Date();
-  doc.isActive = true;
-
-  await doc.save();
+  const doc = await approveDriverProfileReview({
+    driverProfileId,
+    req,
+    reason: req.body.reason || '',
+  });
 
   return sendSuccess({
     res,
@@ -464,24 +460,16 @@ const approveDriverProfile = asyncHandler(async (req, res) => {
 
 const rejectDriverProfile = asyncHandler(async (req, res) => {
   const { driverProfileId } = req.params;
-  const { rejectionReason } = req.body;
+  const { rejectionReason, reason } = req.body;
 
   ensureValidId(driverProfileId, 'رقم ملف السائق غير صحيح');
 
-  const doc = await DriverProfile.findById(driverProfileId);
-
-  if (!doc) {
-    const error = new Error('ملف السائق غير موجود');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  doc.isApproved = false;
-  doc.reviewStatus = 'rejected';
-  doc.rejectionReason = rejectionReason || 'تم رفض طلب السائق';
-  doc.approvedAt = null;
-
-  await doc.save();
+  const doc = await rejectOrRequestUpdateDriverProfile({
+    driverProfileId,
+    req,
+    reason: rejectionReason || reason || '',
+    action: 'rejected',
+  });
 
   return sendSuccess({
     res,
@@ -566,21 +554,11 @@ const approveDriverVehicle = asyncHandler(async (req, res) => {
 
   ensureValidId(driverVehicleId, 'رقم مركبة السائق غير صحيح');
 
-  const doc = await DriverVehicle.findById(driverVehicleId);
-
-  if (!doc) {
-    const error = new Error('مركبة السائق غير موجودة');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  doc.isApproved = true;
-  doc.reviewStatus = 'approved';
-  doc.rejectionReason = '';
-  doc.approvedAt = new Date();
-  doc.isActive = true;
-
-  await doc.save();
+  const doc = await approveDriverVehicleReview({
+    driverVehicleId,
+    req,
+    reason: req.body.reason || '',
+  });
 
   return sendSuccess({
     res,
@@ -591,24 +569,16 @@ const approveDriverVehicle = asyncHandler(async (req, res) => {
 
 const rejectDriverVehicle = asyncHandler(async (req, res) => {
   const { driverVehicleId } = req.params;
-  const { rejectionReason } = req.body;
+  const { rejectionReason, reason } = req.body;
 
   ensureValidId(driverVehicleId, 'رقم مركبة السائق غير صحيح');
 
-  const doc = await DriverVehicle.findById(driverVehicleId);
-
-  if (!doc) {
-    const error = new Error('مركبة السائق غير موجودة');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  doc.isApproved = false;
-  doc.reviewStatus = 'rejected';
-  doc.rejectionReason = rejectionReason || 'تم رفض المركبة';
-  doc.approvedAt = null;
-
-  await doc.save();
+  const doc = await rejectOrRequestUpdateDriverVehicle({
+    driverVehicleId,
+    req,
+    reason: rejectionReason || reason || '',
+    action: 'rejected',
+  });
 
   return sendSuccess({
     res,
