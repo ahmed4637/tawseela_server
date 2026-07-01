@@ -16,6 +16,7 @@ const {
   assertNoActiveRestriction,
   getActiveRestrictions,
 } = require("../services/penalty.service");
+const { updateDriverLiveLocation } = require("../services/tracking.service");
 
 let ioInstance = null;
 
@@ -688,13 +689,6 @@ const initSocketServer = (httpServer) => {
           throw new Error("هذا الإجراء متاح للسائق فقط");
         }
 
-        const lat = Number(payload.lat ?? payload.latitude);
-        const lng = Number(payload.lng ?? payload.longitude);
-
-        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-          throw new Error("الموقع مطلوب");
-        }
-
         const requestIdFromPayload = (
           payload.requestId ||
           payload.serviceRequestId ||
@@ -704,81 +698,47 @@ const initSocketServer = (httpServer) => {
           .toString()
           .trim();
 
-        const driverProfile = await DriverProfile.findOne({
+        const {
+          settings,
+          locationPayload,
+        } = await updateDriverLiveLocation({
           accountId: socket.accountId,
+          requestId: requestIdFromPayload,
+          lat: payload.lat,
+          lng: payload.lng,
+          latitude: payload.latitude,
+          longitude: payload.longitude,
+          speed: payload.speed,
+          heading: payload.heading,
+          accuracy: payload.accuracy,
+          metadata: {
+            socketId: socket.id,
+            platform: payload.platform || null,
+            appVersion: payload.appVersion || null,
+          },
         });
 
-        if (!driverProfile) {
-          throw new Error("ملف السائق غير موجود");
-        }
-
-        let activeRequestId =
-          driverProfile.activeServiceRequestId?.toString() || "";
-
-        if (!activeRequestId && requestIdFromPayload) {
-          if (!isValidObjectId(requestIdFromPayload)) {
-            throw new Error("رقم الطلب غير صحيح");
-          }
-
-          const request = await ServiceRequest.findById(requestIdFromPayload)
-            .select("acceptedDriverAccountId status")
-            .lean();
-
-          const isAcceptedDriver =
-            request?.acceptedDriverAccountId?.toString() === socket.accountId;
-
-          if (!request || !isAcceptedDriver) {
-            throw new Error("غير مسموح بتحديث موقع هذا الطلب");
-          }
-
-          activeRequestId = requestIdFromPayload;
-        }
-
-        const now = Date.now();
-        const shouldSaveLocation = now - lastDriverLocationDbSaveAt >= 3000;
-
-        if (shouldSaveLocation) {
-          driverProfile.currentLat = lat;
-          driverProfile.currentLng = lng;
-          driverProfile.currentLocation = {
-            type: "Point",
-            coordinates: [lng, lat],
-          };
-
-          await driverProfile.save();
-
-          lastDriverLocationDbSaveAt = now;
-        }
-
-        const locationPayload = {
-          driverAccountId: socket.accountId,
-          lat,
-          lng,
-          latitude: lat,
-          longitude: lng,
-          requestId: activeRequestId,
-          serviceRequestId: activeRequestId,
-          rideId: activeRequestId,
-          updatedAt: new Date(),
-        };
-
-        if (activeRequestId) {
+        if (locationPayload.serviceRequestId) {
           emitToRequest(
-            activeRequestId,
+            locationPayload.serviceRequestId,
             "driver:location-updated",
             locationPayload,
           );
         }
 
-        ioInstance.to("admins").emit("driver:location-updated", {
-          ...locationPayload,
-          activeServiceRequestId: activeRequestId,
-        });
+        if (settings.adminLiveTrackingEnabled) {
+          ioInstance.to("admins").emit("driver:location-updated", {
+            ...locationPayload,
+            activeServiceRequestId: locationPayload.serviceRequestId,
+          });
+        }
 
         if (callback) {
           callback({
             success: true,
             message: "تم تحديث موقع السائق",
+            savedToHistory: locationPayload.savedToHistory,
+            savedToDriverProfile: locationPayload.savedToDriverProfile,
           });
         }
       } catch (error) {

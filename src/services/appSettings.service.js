@@ -42,6 +42,16 @@ const DEFAULT_SETTINGS = {
       platinum: 5000,
     },
   },
+
+  tracking: {
+    liveUpdateSeconds: 1,
+    driverProfileSaveSeconds: 3,
+    dbSaveSeconds: 5,
+    minDistanceMetersToSave: 10,
+    staleLocationWarningSeconds: 30,
+    saveOnlyDuringActiveRequest: true,
+    adminLiveTrackingEnabled: true,
+  },
 };
 
 const getAppSettings = async () => {
@@ -77,8 +87,25 @@ const getSearchRadiusKmByServiceType = async (serviceType) => {
   return 5;
 };
 
+
+const getTrackingSettings = async () => {
+  const settings = await getAppSettings();
+  const tracking = settings.tracking || {};
+
+  return {
+    liveUpdateSeconds: Number(tracking.liveUpdateSeconds || 1),
+    driverProfileSaveSeconds: Number(tracking.driverProfileSaveSeconds || 3),
+    dbSaveSeconds: Number(tracking.dbSaveSeconds || 5),
+    minDistanceMetersToSave: Number(tracking.minDistanceMetersToSave || 10),
+    staleLocationWarningSeconds: Number(tracking.staleLocationWarningSeconds || 30),
+    saveOnlyDuringActiveRequest: tracking.saveOnlyDuringActiveRequest !== false,
+    adminLiveTrackingEnabled: tracking.adminLiveTrackingEnabled !== false,
+  };
+};
+
 module.exports = {
   getAppSettings,
   getDriverCommissionDebtLimit,
   getSearchRadiusKmByServiceType,
+  getTrackingSettings,
 };

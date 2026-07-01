@@ -153,6 +153,49 @@ const appSettingsSchema = new mongoose.Schema(
       },
     },
 
+
+    tracking: {
+      liveUpdateSeconds: {
+        type: Number,
+        default: 1,
+        min: 1,
+      },
+
+      driverProfileSaveSeconds: {
+        type: Number,
+        default: 3,
+        min: 1,
+      },
+
+      dbSaveSeconds: {
+        type: Number,
+        default: 5,
+        min: 1,
+      },
+
+      minDistanceMetersToSave: {
+        type: Number,
+        default: 10,
+        min: 0,
+      },
+
+      staleLocationWarningSeconds: {
+        type: Number,
+        default: 30,
+        min: 5,
+      },
+
+      saveOnlyDuringActiveRequest: {
+        type: Boolean,
+        default: true,
+      },
+
+      adminLiveTrackingEnabled: {
+        type: Boolean,
+        default: true,
+      },
+    },
+
     updatedByAdminId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Account',
