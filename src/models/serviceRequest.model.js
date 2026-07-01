@@ -281,6 +281,67 @@ const serviceRequestSchema = new mongoose.Schema(
       min: 0,
     },
 
+    driverNetAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    appDriverPayableAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    driverWalletId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DriverWallet",
+      default: null,
+    },
+
+    commissionTransactionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CommissionTransaction",
+      default: null,
+    },
+
+    financeSummary: {
+      customerPaidToDriver: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      appCoveredDiscountAddedToDriverBalance: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      grossCommissionAmount: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      driverPromoDiscountAmount: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      netCommissionDebtAdded: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      driverNetAfterCommission: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      recordedAt: {
+        type: Date,
+        default: null,
+      },
+    },
+
     loyaltySummary: {
       customerPointsEarned: {
         type: Number,
@@ -404,6 +465,9 @@ serviceRequestSchema.index({ scheduledAt: 1, status: 1 });
 serviceRequestSchema.index({ pickupLocation: "2dsphere" });
 serviceRequestSchema.index({ customerPromoCodeId: 1 });
 serviceRequestSchema.index({ driverPromoCodeId: 1 });
+serviceRequestSchema.index({ driverWalletId: 1 });
+serviceRequestSchema.index({ commissionTransactionId: 1 });
+serviceRequestSchema.index({ acceptedDriverAccountId: 1, completedAt: -1 });
 
 serviceRequestSchema.methods.toSafeObject = function () {
   const request = this.toObject();

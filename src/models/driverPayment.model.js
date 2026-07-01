@@ -8,6 +8,12 @@ const driverPaymentSchema = new mongoose.Schema(
       required: [true, 'رقم حساب السائق مطلوب'],
     },
 
+    walletId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'DriverWallet',
+      default: null,
+    },
+
     amount: {
       type: Number,
       required: [true, 'قيمة السداد مطلوبة'],
@@ -16,7 +22,7 @@ const driverPaymentSchema = new mongoose.Schema(
 
     method: {
       type: String,
-      enum: ['cash', 'wallet', 'bank_transfer', 'vodafone_cash', 'manual'],
+      enum: ['cash', 'wallet', 'bank_transfer', 'vodafone_cash', 'instapay', 'manual'],
       default: 'cash',
     },
 
@@ -24,6 +30,18 @@ const driverPaymentSchema = new mongoose.Schema(
       type: String,
       enum: ['confirmed', 'cancelled'],
       default: 'confirmed',
+    },
+
+    previousDebtAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    debtAfter: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
 
     receivedByAdminId: {
@@ -47,6 +65,8 @@ driverPaymentSchema.index({
   driverAccountId: 1,
   createdAt: -1,
 });
+
+driverPaymentSchema.index({ walletId: 1, createdAt: -1 });
 
 const DriverPayment = mongoose.model('DriverPayment', driverPaymentSchema);
 

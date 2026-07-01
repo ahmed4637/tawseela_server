@@ -6,7 +6,6 @@ const Rating = require("../models/rating.model");
 const Vehicle = require("../models/vehicle.model");
 const DriverProfile = require("../models/driverProfile.model");
 const DriverVehicle = require("../models/driverVehicle.model");
-const CommissionTransaction = require("../models/commissionTransaction.model");
 const {
   getSearchRadiusKmByServiceType,
 } = require("../services/appSettings.service");
@@ -25,6 +24,9 @@ const {
 const {
   awardLoyaltyForCompletedRequest,
 } = require("../services/loyalty.service");
+const {
+  recordCompletedRequestFinance,
+} = require("../services/driverFinance.service");
 const {
   validatePromoCode,
   reserveCustomerPromoForRequest,
@@ -2033,17 +2035,12 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
       (request.finalPrice * commissionPercent) / 100,
     );
 
-    const existingCommission = await CommissionTransaction.findOne({
-      serviceRequestId: request._id,
-      type: "commission",
-    });
-
     let driverPromoApplication = {
       discountAmount: 0,
       netCommissionAmount: request.grossCommissionAmount,
     };
 
-    if (!existingCommission && request.acceptedOfferId) {
+    if (request.acceptedOfferId) {
       const acceptedOffer = await ServiceOffer.findById(request.acceptedOfferId);
       driverPromoApplication = await applyDriverPromoToCommission({
         request,
@@ -2058,59 +2055,49 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     request.commissionAmount = roundMoney(
       driverPromoApplication.netCommissionAmount,
     );
+    request.driverNetAmount = roundMoney(
+      Math.max(request.finalPrice - request.commissionAmount, 0),
+    );
+    request.appDriverPayableAmount = roundMoney(request.appCoveredDiscountAmount || 0);
 
-    if (!existingCommission) {
-      await applyCustomerPromoForRequest({ serviceRequestId: request._id });
+    await applyCustomerPromoForRequest({ serviceRequestId: request._id });
+
+    const financeResult = await recordCompletedRequestFinance({ request });
+
+    if (financeResult.wallet) {
+      request.driverWalletId = financeResult.wallet._id;
     }
 
-    if (!existingCommission && request.commissionAmount > 0) {
-      await CommissionTransaction.create({
-        driverAccountId: request.acceptedDriverAccountId,
-        serviceRequestId: request._id,
-        serviceType: request.serviceType,
-        vehicleTypeCode: request.vehicleTypeCode,
-        finalPrice: request.finalPrice,
-        commissionPercent: request.commissionPercent,
-        amount: request.commissionAmount,
-        status: "unpaid",
-        notes: request.driverPromoDiscountAmount > 0
-          ? `عمولة مستحقة بعد خصم كوبون السائق بقيمة ${request.driverPromoDiscountAmount} جنيه`
-          : "عمولة مستحقة بعد إتمام الطلب",
-      });
+    if (financeResult.commissionTransaction) {
+      request.commissionTransactionId = financeResult.commissionTransaction._id;
     }
 
-    const driverProfile = await DriverProfile.findOne({
-      accountId: request.acceptedDriverAccountId,
-    });
+    request.financeSummary = {
+      customerPaidToDriver: request.customerPayablePrice || 0,
+      appCoveredDiscountAddedToDriverBalance: request.appCoveredDiscountAmount || 0,
+      grossCommissionAmount: request.grossCommissionAmount || 0,
+      driverPromoDiscountAmount: request.driverPromoDiscountAmount || 0,
+      netCommissionDebtAdded: request.commissionAmount || 0,
+      driverNetAfterCommission: request.driverNetAmount || 0,
+      recordedAt: new Date(),
+    };
 
-    if (driverProfile) {
-      if (!existingCommission && request.commissionAmount > 0) {
-        driverProfile.commissionDebt = roundMoney(
-          driverProfile.commissionDebt + request.commissionAmount,
-        );
-      }
-
-      driverProfile.totalCompletedTrips += 1;
-      driverProfile.activeServiceRequestId = null;
-      driverProfile.isAvailable = true;
-      driverProfile.refreshDebtBlockStatus();
-
-      await driverProfile.save();
-
+    if (financeResult.driverProfile) {
       safeSocketEmit(() => {
         emitToAccount(
           request.acceptedDriverAccountId.toString(),
           "finance:debt-updated",
           {
-            commissionDebt: driverProfile.commissionDebt,
-            commissionDebtLimit: driverProfile.commissionDebtLimit,
-            isBlockedForDebt: driverProfile.isBlockedForDebt,
+            commissionDebt: financeResult.driverProfile.commissionDebt,
+            commissionDebtLimit: financeResult.driverProfile.commissionDebtLimit,
+            isBlockedForDebt: financeResult.driverProfile.isBlockedForDebt,
+            wallet: financeResult.wallet,
           },
         );
       });
     }
 
-    const loyaltyResult = !existingCommission
+    const loyaltyResult = !financeResult.wasAlreadyRecorded
       ? await awardLoyaltyForCompletedRequest({ request })
       : { customerTransaction: null, driverTransaction: null };
 
