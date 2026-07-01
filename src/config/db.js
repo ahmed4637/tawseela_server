@@ -1,20 +1,23 @@
 const mongoose = require('mongoose');
 
+const getMongoUri = () => {
+  return process.env.MONGO_URI || process.env.DB_URI || '';
+};
+
 const connectDB = async () => {
-  try {
-    const mongoUri = process.env.MONGO_URI;
+  const mongoUri = getMongoUri();
 
-    if (!mongoUri) {
-      throw new Error('MONGO_URI غير موجود داخل ملف .env');
-    }
-
-    const conn = await mongoose.connect(mongoUri);
-
-    console.log(`MongoDB Connected: ${conn.connection.host}`);
-  } catch (error) {
-    console.error(`MongoDB Connection Error: ${error.message}`);
-    process.exit(1);
+  if (!mongoUri) {
+    throw new Error('MONGO_URI أو DB_URI غير موجود داخل ملف .env');
   }
+
+  const conn = await mongoose.connect(mongoUri, {
+    serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || 10000),
+  });
+
+  console.log(`MongoDB Connected: ${conn.connection.host}`);
+
+  return conn;
 };
 
 module.exports = connectDB;

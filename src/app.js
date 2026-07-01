@@ -41,6 +41,7 @@ const adminServiceTypeRoutes = require('./routes/adminServiceType.routes');
 const adminServiceVehicleConfigRoutes = require('./routes/adminServiceVehicleConfig.routes');
 const adminDispatchSettingRoutes = require('./routes/adminDispatchSetting.routes');
 const mapRoutes = require('./routes/map.routes');
+const systemRoutes = require('./routes/system.routes');
 
 const errorHandler = require('./middlewares/errorHandler');
 
@@ -110,6 +111,7 @@ app.use('/api/loyalty', loyaltyRoutes);
 app.use('/api/account/restrictions', accountRestrictionRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/maps', mapRoutes);
+app.use('/api/system', systemRoutes);
 
 app.use((req, res) => {
   return sendError({

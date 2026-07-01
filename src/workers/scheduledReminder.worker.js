@@ -1,122 +1,74 @@
-const ServiceRequest = require('../models/serviceRequest.model');
-const { createNotification } = require('../services/notification.service');
+const {
+  runScheduledRequestTick,
+} = require('../services/scheduledRequest.service');
+const {
+  getRequestLifecycleSettings,
+} = require('../services/appSettings.service');
 
 let reminderInterval = null;
+let lastTickAt = null;
+let lastTickResult = null;
+let lastTickError = null;
 
-const getDiffMinutes = (targetDate) => {
-  const now = new Date();
-  return Math.floor((new Date(targetDate).getTime() - now.getTime()) / 60000);
-};
-
-const sendReminderIfNeeded = async ({ request, key, title, body }) => {
-  if (request.reminderStatus?.[key] === true) {
-    return;
-  }
-
-  await createNotification({
-    accountId: request.customerAccountId,
-    title,
-    body,
-    type: 'scheduled_reminder',
-    data: {
-      serviceRequestId: request._id,
-      requestCode: request.requestCode,
-      reminderKey: key,
-    },
-  });
-
-  if (request.acceptedDriverAccountId) {
-    await createNotification({
-      accountId: request.acceptedDriverAccountId,
-      title,
-      body,
-      type: 'scheduled_reminder',
-      data: {
-        serviceRequestId: request._id,
-        requestCode: request.requestCode,
-        reminderKey: key,
-      },
-    });
-  }
-
-  request.reminderStatus[key] = true;
-  await request.save();
-};
-
-const checkScheduledRideReminders = async () => {
+const runWorkerTickSafely = async () => {
   try {
-    const now = new Date();
-    const inTwoHours = new Date(now.getTime() + 2 * 60 * 60 * 1000 + 5 * 60 * 1000);
+    const result = await runScheduledRequestTick();
 
-    const requests = await ServiceRequest.find({
-      serviceType: 'scheduled_ride',
-      status: {
-        $in: ['offer_accepted', 'driver_arriving', 'arrived_to_pickup'],
-      },
-      scheduledAt: {
-        $gte: now,
-        $lte: inTwoHours,
-      },
-    });
+    lastTickAt = new Date();
+    lastTickResult = result;
+    lastTickError = null;
 
-    for (const request of requests) {
-      const diffMinutes = getDiffMinutes(request.scheduledAt);
-
-      if (diffMinutes <= 120 && diffMinutes > 60) {
-        await sendReminderIfNeeded({
-          request,
-          key: 'twoHours',
-          title: 'تذكير بالحجز',
-          body: 'متبقي حوالي ساعتين على موعد الرحلة المجدولة',
-        });
-      }
-
-      if (diffMinutes <= 60 && diffMinutes > 30) {
-        await sendReminderIfNeeded({
-          request,
-          key: 'oneHour',
-          title: 'تذكير بالحجز',
-          body: 'متبقي حوالي ساعة على موعد الرحلة المجدولة',
-        });
-      }
-
-      if (diffMinutes <= 30 && diffMinutes > 10) {
-        await sendReminderIfNeeded({
-          request,
-          key: 'thirtyMinutes',
-          title: 'تذكير بالحجز',
-          body: 'متبقي حوالي نصف ساعة على موعد الرحلة المجدولة',
-        });
-      }
-
-      if (diffMinutes <= 10 && diffMinutes >= 0) {
-        await sendReminderIfNeeded({
-          request,
-          key: 'tenMinutes',
-          title: 'تذكير بالحجز',
-          body: 'متبقي حوالي 10 دقائق على موعد الرحلة المجدولة',
-        });
-      }
+    if (
+      result.dispatchedCount > 0 ||
+      result.expiredRequestsCount > 0 ||
+      result.expiredOffersCount > 0
+    ) {
+      console.log('Scheduled request worker tick:', result);
     }
   } catch (error) {
-    console.error('Scheduled reminder worker error:', error.message);
+    lastTickAt = new Date();
+    lastTickError = error.message;
+    console.error('Scheduled request worker error:', error.message);
   }
 };
 
-const startScheduledReminderWorker = () => {
+const startScheduledReminderWorker = async () => {
   if (reminderInterval) {
     return;
   }
 
-  checkScheduledRideReminders();
+  const settings = await getRequestLifecycleSettings();
+  const intervalMs = Math.max(Number(settings.workerIntervalSeconds || 60), 15) * 1000;
+
+  await runWorkerTickSafely();
 
   reminderInterval = setInterval(() => {
-    checkScheduledRideReminders();
-  }, 60 * 1000);
+    runWorkerTickSafely();
+  }, intervalMs);
 
-  console.log('Scheduled reminder worker is running');
+  console.log(`Scheduled request worker is running every ${Math.round(intervalMs / 1000)} seconds`);
+};
+
+const stopScheduledReminderWorker = () => {
+  if (!reminderInterval) {
+    return;
+  }
+
+  clearInterval(reminderInterval);
+  reminderInterval = null;
+};
+
+const getWorkerStatus = () => {
+  return {
+    isRunning: Boolean(reminderInterval),
+    lastTickAt: lastTickAt ? lastTickAt.toISOString() : null,
+    lastTickResult,
+    lastTickError,
+  };
 };
 
 module.exports = {
   startScheduledReminderWorker,
+  stopScheduledReminderWorker,
+  getWorkerStatus,
 };
