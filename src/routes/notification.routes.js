@@ -1,10 +1,13 @@
 const express = require('express');
-const { param } = require('express-validator');
+const { body, param } = require('express-validator');
 
 const {
   getMyNotifications,
   markNotificationAsRead,
   markAllNotificationsAsRead,
+  registerMyDeviceToken,
+  deactivateMyDeviceToken,
+  getMyDeviceTokens,
 } = require('../controllers/notification.controller');
 
 const validateRequest = require('../middlewares/validateRequest');
@@ -15,6 +18,50 @@ const router = express.Router();
 router.use(protect);
 
 router.get('/', getMyNotifications);
+router.get('/device-tokens', getMyDeviceTokens);
+
+router.post(
+  '/device-token',
+  [
+    body('token')
+      .trim()
+      .notEmpty()
+      .withMessage('Token الإشعارات مطلوب'),
+
+    body('platform')
+      .isIn(['android', 'ios', 'web'])
+      .withMessage('نوع الجهاز غير صحيح'),
+
+    body('deviceId')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('appVersion')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('locale')
+      .optional({ checkFalsy: true })
+      .trim(),
+  ],
+  validateRequest,
+  registerMyDeviceToken
+);
+
+router.delete(
+  '/device-token',
+  [
+    body('token')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('deviceId')
+      .optional({ checkFalsy: true })
+      .trim(),
+  ],
+  validateRequest,
+  deactivateMyDeviceToken
+);
 
 router.patch('/read-all', markAllNotificationsAsRead);
 

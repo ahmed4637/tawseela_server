@@ -6,6 +6,14 @@ const notificationSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Account',
       required: true,
+      index: true,
+    },
+
+    templateKey: {
+      type: String,
+      trim: true,
+      default: '',
+      lowercase: true,
     },
 
     title: {
@@ -26,7 +34,15 @@ const notificationSchema = new mongoose.Schema(
         'general',
         'request',
         'offer',
+        'negotiation',
+        'trip',
+        'chat',
         'payment',
+        'promo',
+        'loyalty',
+        'penalty',
+        'complaint',
+        'review',
         'scheduled_reminder',
         'admin',
       ],
@@ -47,6 +63,38 @@ const notificationSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+    pushStatus: {
+      type: String,
+      enum: ['not_requested', 'pending', 'sent', 'partial', 'failed', 'skipped'],
+      default: 'not_requested',
+      index: true,
+    },
+
+    pushSentAt: {
+      type: Date,
+      default: null,
+    },
+
+    pushResult: {
+      successCount: {
+        type: Number,
+        default: 0,
+      },
+      failureCount: {
+        type: Number,
+        default: 0,
+      },
+      failedTokens: {
+        type: [String],
+        default: [],
+      },
+      errorMessage: {
+        type: String,
+        trim: true,
+        default: '',
+      },
+    },
   },
   {
     timestamps: true,
@@ -54,6 +102,7 @@ const notificationSchema = new mongoose.Schema(
 );
 
 notificationSchema.index({ accountId: 1, isRead: 1, createdAt: -1 });
+notificationSchema.index({ templateKey: 1, createdAt: -1 });
 
 const Notification = mongoose.model('Notification', notificationSchema);
 

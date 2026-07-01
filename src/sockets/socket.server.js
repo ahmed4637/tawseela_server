@@ -450,6 +450,31 @@ const initSocketServer = (httpServer) => {
 
         ioInstance.to("admins").emit("admin:chat-message-new", chatPayload);
 
+        if (receiverId) {
+          setImmediate(async () => {
+            try {
+              const { createNotification } = require("../services/notification.service");
+              await createNotification({
+                accountId: receiverId,
+                title: "رسالة جديدة",
+                body:
+                  message.messageType === "text"
+                    ? message.text
+                    : "وصلك محتوى جديد في الشات",
+                type: "chat",
+                data: {
+                  roomId: room._id,
+                  serviceRequestId: room.serviceRequestId,
+                  requestId: room.serviceRequestId,
+                  messageId: message._id,
+                },
+              });
+            } catch (error) {
+              console.error("Socket chat notification error:", error.message);
+            }
+          });
+        }
+
         if (callback) {
           callback({
             success: true,

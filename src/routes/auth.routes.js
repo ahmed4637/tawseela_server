@@ -10,6 +10,10 @@ const {
   getMe,
   updateMe,
 } = require('../controllers/auth.controller');
+const {
+  registerMyDeviceToken,
+  deactivateMyDeviceToken,
+} = require('../controllers/notification.controller');
 
 const validateRequest = require('../middlewares/validateRequest');
 const { protect } = require('../middlewares/authMiddleware');
@@ -59,6 +63,52 @@ router.post(
   ],
   validateRequest,
   login
+);
+
+
+router.post(
+  '/device-token',
+  protect,
+  [
+    body('token')
+      .trim()
+      .notEmpty()
+      .withMessage('Token الإشعارات مطلوب'),
+
+    body('platform')
+      .isIn(['android', 'ios', 'web'])
+      .withMessage('نوع الجهاز غير صحيح'),
+
+    body('deviceId')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('appVersion')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('locale')
+      .optional({ checkFalsy: true })
+      .trim(),
+  ],
+  validateRequest,
+  registerMyDeviceToken
+);
+
+router.post(
+  '/logout',
+  protect,
+  [
+    body('token')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('deviceId')
+      .optional({ checkFalsy: true })
+      .trim(),
+  ],
+  validateRequest,
+  deactivateMyDeviceToken
 );
 
 router.post(
