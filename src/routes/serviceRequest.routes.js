@@ -6,6 +6,7 @@ const {
   getMyServiceRequests,
   getAvailableServiceRequestsForDriver,
   getServiceRequestById,
+  getServiceRequestOffers,
   createDriverOffer,
   createCustomerCounterOffer,
   acceptOffer,
@@ -13,6 +14,8 @@ const {
   acceptCustomerCounterOffer,
   rejectCustomerCounterOffer,
   updateServiceRequestStatus,
+  confirmDeliveryPickup,
+  confirmDeliveryDelivered,
 } = require('../controllers/serviceRequest.controller');
 
 const validateRequest = require('../middlewares/validateRequest');
@@ -131,6 +134,17 @@ router.post(
 router.get('/mine', getMyServiceRequests);
 
 router.get('/available', getAvailableServiceRequestsForDriver);
+
+router.get(
+  '/:id/offers',
+  [
+    param('id')
+      .isMongoId()
+      .withMessage('رقم الطلب غير صحيح'),
+  ],
+  validateRequest,
+  getServiceRequestOffers
+);
 
 router.get(
   '/:id',
@@ -263,6 +277,110 @@ router.post(
   ],
   validateRequest,
   rejectCustomerCounterOffer
+);
+
+router.patch(
+  '/:id/delivery/pickup',
+  [
+    param('id')
+      .isMongoId()
+      .withMessage('رقم الطلب غير صحيح'),
+
+    body('actualItemCost')
+      .optional()
+      .isFloat({ min: 0 })
+      .withMessage('قيمة الطلب غير صحيحة'),
+
+    body('itemCostPaidByDriver')
+      .optional()
+      .isBoolean()
+      .withMessage('حالة دفع السائق غير صحيحة'),
+
+    body('driverPaidForItems')
+      .optional()
+      .isBoolean()
+      .withMessage('حالة دفع السائق غير صحيحة'),
+
+    body('driverPaysForItems')
+      .optional()
+      .isBoolean()
+      .withMessage('حالة دفع السائق غير صحيحة'),
+
+    body('pickupProofType')
+      .optional({ checkFalsy: true })
+      .isIn(['none', 'note', 'image', 'signature', 'otp'])
+      .withMessage('نوع إثبات الاستلام غير صحيح'),
+
+    body('pickupProofUrl')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('pickupProofNote')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('pickupNote')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('paymentNotes')
+      .optional({ checkFalsy: true })
+      .trim(),
+  ],
+  validateRequest,
+  confirmDeliveryPickup
+);
+
+router.patch(
+  '/:id/delivery/delivered',
+  [
+    param('id')
+      .isMongoId()
+      .withMessage('رقم الطلب غير صحيح'),
+
+    body('deliveryProofType')
+      .optional({ checkFalsy: true })
+      .isIn(['none', 'note', 'image', 'signature', 'otp'])
+      .withMessage('نوع إثبات التسليم غير صحيح'),
+
+    body('deliveryProofUrl')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('deliveryProofNote')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('deliveryNote')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('recipientName')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('receiverName')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('deliveredToName')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('recipientPhone')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('receiverPhone')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('handoffOtp')
+      .optional({ checkFalsy: true })
+      .trim(),
+  ],
+  validateRequest,
+  confirmDeliveryDelivered
 );
 
 router.patch(

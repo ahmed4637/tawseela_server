@@ -80,21 +80,44 @@ const buildDeliveryDetailsPayload = (deliveryDetails = {}) => {
   );
   const driverWillPayForItems =
     itemPaymentResponsibility === "driver_pays_pickup" ||
-    deliveryDetails.driverWillPayForItems === true;
-  const expectedItemCost = roundMoney(deliveryDetails.expectedItemCost || 0);
+    deliveryDetails.driverWillPayForItems === true ||
+    deliveryDetails.driverPaysForItems === true;
+  const expectedItemCost = roundMoney(
+    deliveryDetails.expectedItemCost || deliveryDetails.itemCost || 0,
+  );
   const maxItemCostAllowed = roundMoney(
-    deliveryDetails.maxItemCostAllowed || expectedItemCost || 0,
+    deliveryDetails.maxItemCostAllowed ||
+      deliveryDetails.maxItemCost ||
+      expectedItemCost ||
+      0,
   );
 
   return {
-    itemDescription: deliveryDetails.itemDescription || "",
+    itemDescription:
+      deliveryDetails.itemDescription ||
+      deliveryDetails.orderDescription ||
+      deliveryDetails.description ||
+      "",
     itemCategory: deliveryDetails.itemCategory || "",
     quantity: Math.max(Number(deliveryDetails.quantity || 1), 1),
-    itemDeclaredValue: roundMoney(deliveryDetails.itemDeclaredValue || 0),
-    pickupContactName: deliveryDetails.pickupContactName || "",
-    pickupContactPhone: deliveryDetails.pickupContactPhone || "",
-    dropoffContactName: deliveryDetails.dropoffContactName || "",
-    dropoffContactPhone: deliveryDetails.dropoffContactPhone || "",
+    itemDeclaredValue: roundMoney(
+      deliveryDetails.itemDeclaredValue || deliveryDetails.itemCost || 0,
+    ),
+    pickupContactName:
+      deliveryDetails.pickupContactName || deliveryDetails.merchantName || "",
+    pickupContactPhone:
+      deliveryDetails.pickupContactPhone || deliveryDetails.merchantPhone || "",
+    dropoffContactName:
+      deliveryDetails.dropoffContactName ||
+      deliveryDetails.receiverName ||
+      deliveryDetails.recipientName ||
+      "",
+    dropoffContactPhone:
+      deliveryDetails.dropoffContactPhone ||
+      deliveryDetails.deliveryContactPhone ||
+      deliveryDetails.receiverPhone ||
+      deliveryDetails.recipientPhone ||
+      "",
     itemPaymentResponsibility,
     driverWillPayForItems,
     expectedItemCost,
@@ -1820,6 +1843,99 @@ const getServiceRequestById = asyncHandler(async (req, res) => {
   });
 });
 
+const canAccountSeeRequestOffers = ({ request, accountId, roles = [] }) => {
+  const isCustomer = request.customerAccountId?.toString() === accountId;
+  const isAcceptedDriver =
+    request.acceptedDriverAccountId?.toString() === accountId;
+  const isAdmin = roles.includes("admin");
+
+  return isCustomer || isAcceptedDriver || isAdmin;
+};
+
+const getServiceRequestOffers = asyncHandler(async (req, res) => {
+  const request = await ensureRequestExists(req.params.id);
+
+  if (
+    !canAccountSeeRequestOffers({
+      request,
+      accountId: req.accountId,
+      roles: req.roles || [],
+    })
+  ) {
+    const error = new Error("غير مسموح لك بعرض عروض هذا الطلب");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const offerDocs = await ServiceOffer.find({
+    serviceRequestId: request._id,
+  })
+    .populate("driverAccountId", accountPublicFields)
+    .populate("driverVehicleId", driverVehiclePublicFields)
+    .sort({ createdAt: -1 });
+
+  const docs = [];
+
+  for (const offerDoc of offerDocs) {
+    const enrichedOffer = await buildEnrichedOffer(offerDoc);
+    if (enrichedOffer) {
+      docs.push(enrichedOffer);
+    }
+  }
+
+  return sendSuccess({
+    res,
+    message: "تم جلب عروض الطلب بنجاح",
+    docs,
+  });
+});
+
+const getOfferNegotiations = asyncHandler(async (req, res) => {
+  const offer = await ServiceOffer.findById(req.params.offerId);
+
+  if (!offer) {
+    const error = new Error("العرض غير موجود");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const request = await ensureRequestExists(offer.serviceRequestId);
+  const isCustomer = request.customerAccountId?.toString() === req.accountId;
+  const isOfferDriver = offer.driverAccountId?.toString() === req.accountId;
+  const isAcceptedDriver =
+    request.acceptedDriverAccountId?.toString() === req.accountId;
+  const isAdmin = req.roles?.includes("admin");
+
+  if (!isCustomer && !isOfferDriver && !isAcceptedDriver && !isAdmin) {
+    const error = new Error("غير مسموح لك بعرض سجل التفاوض");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const offerDocs = await ServiceOffer.find({
+    serviceRequestId: offer.serviceRequestId,
+    driverAccountId: offer.driverAccountId,
+  })
+    .populate("driverAccountId", accountPublicFields)
+    .populate("driverVehicleId", driverVehiclePublicFields)
+    .sort({ createdAt: 1 });
+
+  const docs = [];
+
+  for (const offerDoc of offerDocs) {
+    const enrichedOffer = await buildEnrichedOffer(offerDoc);
+    if (enrichedOffer) {
+      docs.push(enrichedOffer);
+    }
+  }
+
+  return sendSuccess({
+    res,
+    message: "تم جلب سجل التفاوض بنجاح",
+    docs,
+  });
+});
+
 const createDriverOffer = asyncHandler(async (req, res) => {
   if (!req.roles?.includes("driver")) {
     const error = new Error("هذا الإجراء متاح للسائق فقط");
@@ -2307,8 +2423,12 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     deliveryProofType,
     deliveryProofUrl,
     deliveryProofNote,
+    deliveryNote,
     recipientName,
+    receiverName: receiverNameFromBody,
+    deliveredToName,
     recipientPhone,
+    receiverPhone,
     handoffOtp,
   } = req.body;
 
@@ -2390,8 +2510,14 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
 
       const proofType = deliveryProofType || details.deliveryProofType || "none";
       const proofUrl = deliveryProofUrl || details.deliveryProofUrl || "";
-      const proofNote = deliveryProofNote || details.deliveryProofNote || "";
-      const receiverName = recipientName || details.recipientName || "";
+      const proofNote =
+        deliveryProofNote || deliveryNote || details.deliveryProofNote || "";
+      const receiverName =
+        recipientName ||
+        receiverNameFromBody ||
+        deliveredToName ||
+        details.recipientName ||
+        "";
 
       if (proofType === "none" && !proofUrl && !proofNote && !receiverName) {
         const error = new Error("إثبات تسليم الطلب أو اسم المستلم مطلوب");
@@ -2405,7 +2531,8 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
       request.deliveryDetails.deliveryProofUrl = proofUrl;
       request.deliveryDetails.deliveryProofNote = proofNote;
       request.deliveryDetails.recipientName = receiverName;
-      request.deliveryDetails.recipientPhone = recipientPhone || details.recipientPhone || "";
+      request.deliveryDetails.recipientPhone =
+        recipientPhone || receiverPhone || details.recipientPhone || "";
       request.deliveryDetails.handoffOtp = handoffOtp || details.handoffOtp || "";
     }
 
@@ -2806,11 +2933,21 @@ const confirmDeliveryPickup = asyncHandler(async (req, res, next) => {
   const {
     actualItemCost,
     itemCostPaidByDriver,
+    driverPaidForItems,
+    driverPaysForItems,
     pickupProofType,
     pickupProofUrl,
     pickupProofNote,
+    pickupNote,
     paymentNotes,
   } = req.body;
+
+  const paidByDriverValue =
+    itemCostPaidByDriver !== undefined
+      ? itemCostPaidByDriver
+      : driverPaidForItems !== undefined
+        ? driverPaidForItems
+        : driverPaysForItems;
 
   const normalizedActualItemCost = roundMoney(
     actualItemCost !== undefined
@@ -2832,12 +2969,12 @@ const confirmDeliveryPickup = asyncHandler(async (req, res, next) => {
   request.deliveryDetails.actualItemCost = normalizedActualItemCost;
   request.deliveryDetails.itemCostPaidByDriver =
     responsibility === "driver_pays_pickup"
-      ? itemCostPaidByDriver !== false
-      : itemCostPaidByDriver === true;
+      ? paidByDriverValue !== false
+      : paidByDriverValue === true;
   request.deliveryDetails.itemCostConfirmedAt = new Date();
   request.deliveryDetails.pickupProofType = pickupProofType || "note";
   request.deliveryDetails.pickupProofUrl = pickupProofUrl || "";
-  request.deliveryDetails.pickupProofNote = pickupProofNote || "";
+  request.deliveryDetails.pickupProofNote = pickupProofNote || pickupNote || "";
   request.deliveryDetails.paymentNotes =
     paymentNotes || request.deliveryDetails.paymentNotes || "";
 
@@ -2876,6 +3013,8 @@ module.exports = {
   getMyServiceRequests,
   getAvailableServiceRequestsForDriver,
   getServiceRequestById,
+  getServiceRequestOffers,
+  getOfferNegotiations,
   createDriverOffer,
   createCustomerCounterOffer,
   acceptOffer,

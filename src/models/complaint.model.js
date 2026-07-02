@@ -150,7 +150,6 @@ const complaintSchema = new mongoose.Schema(
   },
 );
 
-complaintSchema.index({ complaintCode: 1 }, { unique: true, sparse: true });
 complaintSchema.index({ serviceRequestId: 1, createdAt: -1 });
 complaintSchema.index({ status: 1, priority: 1, createdAt: -1 });
 complaintSchema.index({ assignedAdminId: 1, status: 1, createdAt: -1 });
