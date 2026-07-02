@@ -69,9 +69,33 @@ const normalizeDeliveryPaymentResponsibility = (deliveryDetails = {}) => {
     return deliveryDetails.itemPaymentResponsibility;
   }
 
-  return deliveryDetails.driverWillPayForItems === true
-    ? "driver_pays_pickup"
-    : "customer_pays_pickup";
+  const driverPays =
+    deliveryDetails.driverWillPayForItems === true ||
+    deliveryDetails.driverPaysForItems === true ||
+    deliveryDetails.driverPaidForItems === true ||
+    deliveryDetails.itemCostPaidByDriver === true;
+
+  return driverPays ? "driver_pays_pickup" : "customer_pays_pickup";
+};
+
+const firstNonEmptyValue = (...values) => {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value.toString().trim() !== "") {
+      return value;
+    }
+  }
+
+  return "";
+};
+
+const firstDefinedValue = (...values) => {
+  for (const value of values) {
+    if (value !== undefined && value !== null) {
+      return value;
+    }
+  }
+
+  return undefined;
 };
 
 const buildDeliveryDetailsPayload = (deliveryDetails = {}) => {
@@ -80,44 +104,68 @@ const buildDeliveryDetailsPayload = (deliveryDetails = {}) => {
   );
   const driverWillPayForItems =
     itemPaymentResponsibility === "driver_pays_pickup" ||
-    deliveryDetails.driverWillPayForItems === true ||
-    deliveryDetails.driverPaysForItems === true;
+    deliveryDetails.driverWillPayForItems === true;
   const expectedItemCost = roundMoney(
-    deliveryDetails.expectedItemCost || deliveryDetails.itemCost || 0,
+    firstDefinedValue(
+      deliveryDetails.expectedItemCost,
+      deliveryDetails.estimatedItemCost,
+      deliveryDetails.itemEstimatedCost,
+      0,
+    ),
   );
   const maxItemCostAllowed = roundMoney(
-    deliveryDetails.maxItemCostAllowed ||
-      deliveryDetails.maxItemCost ||
-      expectedItemCost ||
+    firstDefinedValue(
+      deliveryDetails.maxItemCostAllowed,
+      deliveryDetails.maxAllowedItemCost,
+      deliveryDetails.maxAllowedValue,
+      expectedItemCost,
       0,
+    ),
+  );
+
+  const pickupContactName = firstNonEmptyValue(
+    deliveryDetails.pickupContactName,
+    deliveryDetails.pickupName,
+    deliveryDetails.storeName,
+  );
+  const pickupContactPhone = firstNonEmptyValue(
+    deliveryDetails.pickupContactPhone,
+    deliveryDetails.pickupPhone,
+    deliveryDetails.storePhone,
+  );
+  const dropoffContactName = firstNonEmptyValue(
+    deliveryDetails.dropoffContactName,
+    deliveryDetails.recipientName,
+    deliveryDetails.receiverName,
+  );
+  const dropoffContactPhone = firstNonEmptyValue(
+    deliveryDetails.dropoffContactPhone,
+    deliveryDetails.recipientPhone,
+    deliveryDetails.receiverPhone,
   );
 
   return {
-    itemDescription:
-      deliveryDetails.itemDescription ||
-      deliveryDetails.orderDescription ||
-      deliveryDetails.description ||
-      "",
-    itemCategory: deliveryDetails.itemCategory || "",
+    itemDescription: firstNonEmptyValue(
+      deliveryDetails.itemDescription,
+      deliveryDetails.description,
+    ),
+    itemCategory: firstNonEmptyValue(
+      deliveryDetails.itemCategory,
+      deliveryDetails.category,
+    ),
     quantity: Math.max(Number(deliveryDetails.quantity || 1), 1),
     itemDeclaredValue: roundMoney(
-      deliveryDetails.itemDeclaredValue || deliveryDetails.itemCost || 0,
+      firstDefinedValue(
+        deliveryDetails.itemDeclaredValue,
+        deliveryDetails.declaredValue,
+        deliveryDetails.expectedItemCost,
+        0,
+      ),
     ),
-    pickupContactName:
-      deliveryDetails.pickupContactName || deliveryDetails.merchantName || "",
-    pickupContactPhone:
-      deliveryDetails.pickupContactPhone || deliveryDetails.merchantPhone || "",
-    dropoffContactName:
-      deliveryDetails.dropoffContactName ||
-      deliveryDetails.receiverName ||
-      deliveryDetails.recipientName ||
-      "",
-    dropoffContactPhone:
-      deliveryDetails.dropoffContactPhone ||
-      deliveryDetails.deliveryContactPhone ||
-      deliveryDetails.receiverPhone ||
-      deliveryDetails.recipientPhone ||
-      "",
+    pickupContactName,
+    pickupContactPhone,
+    dropoffContactName,
+    dropoffContactPhone,
     itemPaymentResponsibility,
     driverWillPayForItems,
     expectedItemCost,
@@ -138,10 +186,14 @@ const buildDeliveryDetailsPayload = (deliveryDetails = {}) => {
     deliveryProofType: "none",
     deliveryProofUrl: "",
     deliveryProofNote: "",
-    recipientName: deliveryDetails.dropoffContactName || "",
-    recipientPhone: deliveryDetails.dropoffContactPhone || "",
-    handoffOtp: "",
-    paymentNotes: deliveryDetails.paymentNotes || "",
+    recipientName: dropoffContactName,
+    recipientPhone: dropoffContactPhone,
+    handoffOtp: firstNonEmptyValue(deliveryDetails.handoffOtp),
+    paymentNotes: firstNonEmptyValue(
+      deliveryDetails.paymentNotes,
+      deliveryDetails.paymentNote,
+      deliveryDetails.notes,
+    ),
   };
 };
 
@@ -1843,33 +1895,27 @@ const getServiceRequestById = asyncHandler(async (req, res) => {
   });
 });
 
-const canAccountSeeRequestOffers = ({ request, accountId, roles = [] }) => {
-  const isCustomer = request.customerAccountId?.toString() === accountId;
+const getRequestOffers = asyncHandler(async (req, res) => {
+  const baseRequest = await ensureRequestExists(req.params.id);
+
+  const isCustomer = baseRequest.customerAccountId.toString() === req.accountId;
   const isAcceptedDriver =
-    request.acceptedDriverAccountId?.toString() === accountId;
-  const isAdmin = roles.includes("admin");
+    baseRequest.acceptedDriverAccountId?.toString() === req.accountId;
+  const isAdmin = req.roles?.includes("admin");
 
-  return isCustomer || isAcceptedDriver || isAdmin;
-};
-
-const getServiceRequestOffers = asyncHandler(async (req, res) => {
-  const request = await ensureRequestExists(req.params.id);
-
-  if (
-    !canAccountSeeRequestOffers({
-      request,
-      accountId: req.accountId,
-      roles: req.roles || [],
-    })
-  ) {
+  if (!isCustomer && !isAcceptedDriver && !isAdmin) {
     const error = new Error("غير مسموح لك بعرض عروض هذا الطلب");
     error.statusCode = 403;
     throw error;
   }
 
-  const offerDocs = await ServiceOffer.find({
-    serviceRequestId: request._id,
-  })
+  const query = { serviceRequestId: baseRequest._id };
+
+  if (req.roles?.includes("driver") && !isCustomer && !isAdmin) {
+    query.driverAccountId = req.accountId;
+  }
+
+  const offerDocs = await ServiceOffer.find(query)
     .populate("driverAccountId", accountPublicFields)
     .populate("driverVehicleId", driverVehiclePublicFields)
     .sort({ createdAt: -1 });
@@ -1878,6 +1924,7 @@ const getServiceRequestOffers = asyncHandler(async (req, res) => {
 
   for (const offerDoc of offerDocs) {
     const enrichedOffer = await buildEnrichedOffer(offerDoc);
+
     if (enrichedOffer) {
       docs.push(enrichedOffer);
     }
@@ -1900,21 +1947,29 @@ const getOfferNegotiations = asyncHandler(async (req, res) => {
   }
 
   const request = await ensureRequestExists(offer.serviceRequestId);
-  const isCustomer = request.customerAccountId?.toString() === req.accountId;
-  const isOfferDriver = offer.driverAccountId?.toString() === req.accountId;
+
+  const isCustomer = request.customerAccountId.toString() === req.accountId;
+  const isOfferDriver = offer.driverAccountId.toString() === req.accountId;
   const isAcceptedDriver =
     request.acceptedDriverAccountId?.toString() === req.accountId;
   const isAdmin = req.roles?.includes("admin");
 
   if (!isCustomer && !isOfferDriver && !isAcceptedDriver && !isAdmin) {
-    const error = new Error("غير مسموح لك بعرض سجل التفاوض");
+    const error = new Error("غير مسموح لك بعرض سجل هذا العرض");
     error.statusCode = 403;
     throw error;
   }
 
+  const rootOfferId = offer.parentOfferId || offer._id;
+
   const offerDocs = await ServiceOffer.find({
-    serviceRequestId: offer.serviceRequestId,
-    driverAccountId: offer.driverAccountId,
+    serviceRequestId: request._id,
+    $or: [
+      { _id: rootOfferId },
+      { parentOfferId: rootOfferId },
+      { _id: offer._id },
+      { parentOfferId: offer._id },
+    ],
   })
     .populate("driverAccountId", accountPublicFields)
     .populate("driverVehicleId", driverVehiclePublicFields)
@@ -1924,6 +1979,7 @@ const getOfferNegotiations = asyncHandler(async (req, res) => {
 
   for (const offerDoc of offerDocs) {
     const enrichedOffer = await buildEnrichedOffer(offerDoc);
+
     if (enrichedOffer) {
       docs.push(enrichedOffer);
     }
@@ -2424,9 +2480,9 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     deliveryProofUrl,
     deliveryProofNote,
     deliveryNote,
+    proofNote,
     recipientName,
-    receiverName: receiverNameFromBody,
-    deliveredToName,
+    receiverName,
     recipientPhone,
     receiverPhone,
     handoffOtp,
@@ -2510,16 +2566,17 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
 
       const proofType = deliveryProofType || details.deliveryProofType || "none";
       const proofUrl = deliveryProofUrl || details.deliveryProofUrl || "";
-      const proofNote =
-        deliveryProofNote || deliveryNote || details.deliveryProofNote || "";
-      const receiverName =
-        recipientName ||
-        receiverNameFromBody ||
-        deliveredToName ||
-        details.recipientName ||
-        "";
+      const normalizedDeliveryProofNote =
+        deliveryProofNote || deliveryNote || proofNote || details.deliveryProofNote || "";
+      const normalizedRecipientName =
+        recipientName || receiverName || details.recipientName || "";
 
-      if (proofType === "none" && !proofUrl && !proofNote && !receiverName) {
+      if (
+        proofType === "none" &&
+        !proofUrl &&
+        !normalizedDeliveryProofNote &&
+        !normalizedRecipientName
+      ) {
         const error = new Error("إثبات تسليم الطلب أو اسم المستلم مطلوب");
         error.statusCode = 400;
         throw error;
@@ -2529,8 +2586,8 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
       request.deliveryDetails.deliveredAt = request.deliveryDetails.deliveredAt || new Date();
       request.deliveryDetails.deliveryProofType = proofType;
       request.deliveryDetails.deliveryProofUrl = proofUrl;
-      request.deliveryDetails.deliveryProofNote = proofNote;
-      request.deliveryDetails.recipientName = receiverName;
+      request.deliveryDetails.deliveryProofNote = normalizedDeliveryProofNote;
+      request.deliveryDetails.recipientName = normalizedRecipientName;
       request.deliveryDetails.recipientPhone =
         recipientPhone || receiverPhone || details.recipientPhone || "";
       request.deliveryDetails.handoffOtp = handoffOtp || details.handoffOtp || "";
@@ -2932,6 +2989,7 @@ const confirmDeliveryPickup = asyncHandler(async (req, res, next) => {
 
   const {
     actualItemCost,
+    actualValue,
     itemCostPaidByDriver,
     driverPaidForItems,
     driverPaysForItems,
@@ -2939,20 +2997,17 @@ const confirmDeliveryPickup = asyncHandler(async (req, res, next) => {
     pickupProofUrl,
     pickupProofNote,
     pickupNote,
+    proofNote,
     paymentNotes,
   } = req.body;
 
-  const paidByDriverValue =
-    itemCostPaidByDriver !== undefined
-      ? itemCostPaidByDriver
-      : driverPaidForItems !== undefined
-        ? driverPaidForItems
-        : driverPaysForItems;
-
   const normalizedActualItemCost = roundMoney(
-    actualItemCost !== undefined
-      ? actualItemCost
-      : request.deliveryDetails?.expectedItemCost || 0,
+    firstDefinedValue(
+      actualItemCost,
+      actualValue,
+      request.deliveryDetails?.expectedItemCost,
+      0,
+    ),
   );
 
   assertDeliveryItemCostWithinLimit({
@@ -2969,12 +3024,23 @@ const confirmDeliveryPickup = asyncHandler(async (req, res, next) => {
   request.deliveryDetails.actualItemCost = normalizedActualItemCost;
   request.deliveryDetails.itemCostPaidByDriver =
     responsibility === "driver_pays_pickup"
-      ? paidByDriverValue !== false
-      : paidByDriverValue === true;
+      ? firstDefinedValue(
+          itemCostPaidByDriver,
+          driverPaidForItems,
+          driverPaysForItems,
+          true,
+        ) !== false
+      : firstDefinedValue(
+          itemCostPaidByDriver,
+          driverPaidForItems,
+          driverPaysForItems,
+          false,
+        ) === true;
   request.deliveryDetails.itemCostConfirmedAt = new Date();
   request.deliveryDetails.pickupProofType = pickupProofType || "note";
   request.deliveryDetails.pickupProofUrl = pickupProofUrl || "";
-  request.deliveryDetails.pickupProofNote = pickupProofNote || pickupNote || "";
+  request.deliveryDetails.pickupProofNote =
+    pickupProofNote || pickupNote || proofNote || "";
   request.deliveryDetails.paymentNotes =
     paymentNotes || request.deliveryDetails.paymentNotes || "";
 
@@ -3013,7 +3079,7 @@ module.exports = {
   getMyServiceRequests,
   getAvailableServiceRequestsForDriver,
   getServiceRequestById,
-  getServiceRequestOffers,
+  getRequestOffers,
   getOfferNegotiations,
   createDriverOffer,
   createCustomerCounterOffer,

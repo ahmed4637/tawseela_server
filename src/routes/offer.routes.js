@@ -4,7 +4,6 @@ const { param } = require('express-validator');
 const {
   getOfferNegotiations,
 } = require('../controllers/serviceRequest.controller');
-
 const validateRequest = require('../middlewares/validateRequest');
 const { protect } = require('../middlewares/authMiddleware');
 
@@ -20,7 +19,7 @@ router.get(
       .withMessage('رقم العرض غير صحيح'),
   ],
   validateRequest,
-  getOfferNegotiations
+  getOfferNegotiations,
 );
 
 module.exports = router;
