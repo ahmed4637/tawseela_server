@@ -2254,12 +2254,6 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
   const request = await ensureRequestExists(req.params.id);
   assertRequestNotLifecycleLocked(request);
 
-  if (request.customerAccountId.toString() !== req.accountId) {
-    const error = new Error("العميل صاحب الطلب فقط يمكنه إرسال سعر مضاد");
-    error.statusCode = 403;
-    throw error;
-  }
-
   if (!["pending_offers", "negotiating"].includes(request.status)) {
     const error = new Error("لا يمكن إرسال سعر مضاد على هذا الطلب حاليًا");
     error.statusCode = 400;
@@ -2269,7 +2263,7 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
   assertRequestCanReceiveDriverActivity(request);
 
   const { offerId } = req.params;
-  const { offeredPrice, message } = req.body;
+  const { offeredPrice, counterPrice, message } = req.body;
 
   const parentOffer = await ServiceOffer.findOne({
     _id: offerId,
@@ -2285,13 +2279,44 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
 
   assertOfferStillValid(parentOffer);
 
-  if (parentOffer.sentBy !== "driver") {
-    const error = new Error("يمكن إرسال سعر مضاد فقط على عرض مرسل من السائق");
-    error.statusCode = 400;
+  const isCustomerActor = request.customerAccountId.toString() === req.accountId;
+  const isDriverActor = parentOffer.driverAccountId.toString() === req.accountId;
+
+  let sentBy = "";
+  let receiverAccountId = null;
+  let notificationTitle = "";
+  let notificationBody = "";
+  let successMessage = "";
+
+  if (isCustomerActor) {
+    if (parentOffer.sentBy !== "driver") {
+      const error = new Error("يمكن للعميل إرسال سعر مضاد فقط على عرض مرسل من السائق");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    sentBy = "customer";
+    receiverAccountId = parentOffer.driverAccountId;
+    notificationTitle = "سعر مضاد من العميل";
+    successMessage = "تم إرسال السعر المضاد للسائق بنجاح";
+  } else if (isDriverActor) {
+    if (parentOffer.sentBy !== "customer") {
+      const error = new Error("يمكن للسائق إرسال سعر جديد فقط بعد سعر مضاد من العميل");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    sentBy = "driver";
+    receiverAccountId = request.customerAccountId;
+    notificationTitle = "سعر جديد من السائق";
+    successMessage = "تم إرسال السعر الجديد للعميل بنجاح";
+  } else {
+    const error = new Error("غير مسموح لك بالتفاوض على هذا العرض");
+    error.statusCode = 403;
     throw error;
   }
 
-  const price = Number(offeredPrice);
+  const price = Number(counterPrice ?? offeredPrice);
 
   if (price <= 0) {
     const error = new Error("السعر المضاد غير صحيح");
@@ -2300,6 +2325,9 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
   }
 
   parentOffer.status = "cancelled";
+  parentOffer.closedAt = new Date();
+  parentOffer.closedReason = "replaced_by_counter_offer";
+  parentOffer.closedBy = sentBy;
   await parentOffer.save();
 
   await ServiceOffer.updateMany(
@@ -2307,10 +2335,15 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
       serviceRequestId: request._id,
       driverAccountId: parentOffer.driverAccountId,
       status: "pending",
-      sentBy: "customer",
+      _id: { $ne: parentOffer._id },
     },
     {
-      status: "cancelled",
+      $set: {
+        status: "cancelled",
+        closedAt: new Date(),
+        closedReason: "replaced_by_counter_offer",
+        closedBy: sentBy,
+      },
     },
   );
 
@@ -2321,7 +2354,7 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
     offeredPrice: roundMoney(price),
     message: message || "",
     status: "pending",
-    sentBy: "customer",
+    sentBy,
     parentOfferId: parentOffer._id,
     expiresAt: await getOfferExpiryDate(),
   });
@@ -2332,8 +2365,19 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
   const enrichedCounterOffer = await loadEnrichedOfferById(counterOffer._id);
   const counterOfferForResponse = enrichedCounterOffer || counterOffer;
 
+  notificationBody = sentBy === "customer"
+    ? `العميل عرض سعر ${counterOffer.offeredPrice} جنيه`
+    : `السائق عرض سعر جديد ${counterOffer.offeredPrice} جنيه`;
+
   safeSocketEmit(() => {
-    emitToAccount(parentOffer.driverAccountId.toString(), "offer:countered", {
+    emitToAccount(receiverAccountId.toString(), "offer:countered", {
+      requestId: request._id,
+      serviceRequestId: request._id,
+      offer: counterOfferForResponse,
+      request,
+    });
+
+    emitToAccount(req.accountId, "offer:countered", {
       requestId: request._id,
       serviceRequestId: request._id,
       offer: counterOfferForResponse,
@@ -2356,21 +2400,22 @@ const createCustomerCounterOffer = asyncHandler(async (req, res) => {
   });
 
   await safeCreateNotification({
-    accountId: parentOffer.driverAccountId,
-    title: "سعر مضاد من العميل",
-    body: `العميل عرض سعر ${counterOffer.offeredPrice} جنيه`,
+    accountId: receiverAccountId,
+    title: notificationTitle,
+    body: notificationBody,
     type: "offer",
     data: {
       serviceRequestId: request._id,
       offerId: counterOffer._id,
       offeredPrice: counterOffer.offeredPrice,
+      sentBy,
     },
   });
 
   return sendSuccess({
     res,
     statusCode: 201,
-    message: "تم إرسال السعر المضاد للسائق بنجاح",
+    message: successMessage,
     doc: counterOfferForResponse,
   });
 });
