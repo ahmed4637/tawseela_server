@@ -182,13 +182,15 @@ const ensureDefaultNotificationTemplates = async () => {
   const docs = [];
 
   for (const template of DEFAULT_NOTIFICATION_TEMPLATES) {
+    const { targetType, type, ...insertOnlyTemplate } = template;
+
     const doc = await NotificationTemplate.findOneAndUpdate(
       { key: template.key },
       {
-        $setOnInsert: template,
+        $setOnInsert: insertOnlyTemplate,
         $set: {
-          targetType: template.targetType,
-          type: template.type,
+          targetType,
+          type,
           isActive: true,
         },
       },

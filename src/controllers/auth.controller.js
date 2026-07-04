@@ -8,6 +8,7 @@ const DriverVehicle = require('../models/driverVehicle.model');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 const { generateToken } = require('../utils/jwt');
+const { buildPublicUrl } = require('../utils/publicUrl');
 const { getDriverCommissionDebtLimit } = require('../services/appSettings.service');
 const { getOrCreateLoyaltyAccount } = require('../services/loyalty.service');
 const { getEffectiveAdminAccess } = require('../services/adminAccess.service');
@@ -115,6 +116,52 @@ const validatePlateNumberByVehicle = ({ vehicleTypeCode, plateNumber }) => {
   }
 };
 
+
+const toPlainObject = (doc) => {
+  if (!doc) return doc;
+  return typeof doc.toObject === 'function' ? doc.toObject() : doc;
+};
+
+const withProfileImageUrls = (accountObject) => {
+  if (!accountObject) return accountObject;
+
+  const raw = toPlainObject(accountObject);
+  const profileImage = raw.profileImage || raw.image || raw.photo || raw.avatar || '';
+
+  return {
+    ...raw,
+    profileImage: raw.profileImage || profileImage,
+    profileImageUrl: buildPublicUrl(profileImage),
+  };
+};
+
+const withDriverProfileImageUrls = (profileObject) => {
+  if (!profileObject) return profileObject;
+
+  const raw = toPlainObject(profileObject);
+
+  return {
+    ...raw,
+    profileImageUrl: buildPublicUrl(raw.profileImage),
+    nationalIdImageUrl: buildPublicUrl(raw.nationalIdImage),
+    licenseImageUrl: buildPublicUrl(raw.licenseImage),
+  };
+};
+
+const withDriverVehicleImageUrls = (vehicleObject) => {
+  if (!vehicleObject) return vehicleObject;
+
+  const raw = toPlainObject(vehicleObject);
+  const vehicleImage = raw.vehicleImage || raw.vehiclePhoto || raw.carImage || raw.image || raw.photo || '';
+
+  return {
+    ...raw,
+    vehicleImage: raw.vehicleImage || vehicleImage,
+    vehicleImageUrl: buildPublicUrl(vehicleImage),
+    licenseImageUrl: buildPublicUrl(raw.licenseImage),
+  };
+};
+
 const buildAccountAuthResponse = async (account) => {
   const safeAccount = account.toSafeObject();
 
@@ -160,6 +207,7 @@ const buildAccountAuthResponse = async (account) => {
       email: safeAccount.email,
       phone: safeAccount.phone,
       profileImage: safeAccount.profileImage || '',
+      profileImageUrl: buildPublicUrl(safeAccount.profileImage),
       roles: safeAccount.roles,
       defaultRole: safeAccount.defaultRole,
       isActive: safeAccount.isActive,
@@ -169,8 +217,8 @@ const buildAccountAuthResponse = async (account) => {
     },
     adminAccess,
     loyaltyAccount,
-    driverProfile,
-    driverVehicles,
+    driverProfile: withDriverProfileImageUrls(driverProfile),
+    driverVehicles: driverVehicles.map(withDriverVehicleImageUrls),
   };
 };
 
@@ -416,8 +464,8 @@ const cleanLicenseImage = normalizeUploadedImagePath({
     message: 'تم إرسال طلب الانضمام كسائق للمراجعة',
     doc: {
       ...authData,
-      driverProfile,
-      driverVehicle,
+      driverProfile: withDriverProfileImageUrls(driverProfile),
+      driverVehicle: withDriverVehicleImageUrls(driverVehicle),
     },
   });
 });
@@ -632,7 +680,7 @@ validatePlateNumberByVehicle({
     message: 'تم تحديث بيانات المركبة بنجاح',
     doc: {
       ...authData,
-      driverVehicle: vehicle,
+      driverVehicle: withDriverVehicleImageUrls(vehicle),
     },
   });
 });

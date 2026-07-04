@@ -19,6 +19,7 @@ const {
 
 const asyncHandler = require("../utils/asyncHandler");
 const { sendSuccess } = require("../utils/apiResponse");
+const { buildPublicUrl } = require("../utils/publicUrl");
 const { createNotification } = require("../services/notification.service");
 const {
   createChatRoomForAcceptedRequest,
@@ -1626,6 +1627,45 @@ const toPlainObject = (doc) => {
     : { ...doc };
 };
 
+
+const attachAccountImageUrls = (accountObject) => {
+  if (!accountObject) return accountObject;
+
+  const raw = toPlainObject(accountObject);
+  const profileImage = firstNonEmptyValue(
+    raw.profileImage,
+    raw.image,
+    raw.photo,
+    raw.avatar,
+  );
+
+  return {
+    ...raw,
+    profileImage: raw.profileImage || profileImage,
+    profileImageUrl: buildPublicUrl(profileImage),
+  };
+};
+
+const attachVehicleImageUrls = (vehicleObject) => {
+  if (!vehicleObject) return vehicleObject;
+
+  const raw = toPlainObject(vehicleObject);
+  const vehicleImage = firstNonEmptyValue(
+    raw.vehicleImage,
+    raw.vehiclePhoto,
+    raw.carImage,
+    raw.image,
+    raw.photo,
+  );
+
+  return {
+    ...raw,
+    vehicleImage: raw.vehicleImage || vehicleImage,
+    vehicleImageUrl: buildPublicUrl(vehicleImage),
+    licenseImageUrl: buildPublicUrl(raw.licenseImage),
+  };
+};
+
 const buildAccountRatingSummary = async (accountId) => {
   if (!accountId) {
     return {
@@ -1670,7 +1710,7 @@ const enrichAccountObject = async (accountObject) => {
   const rating = await buildAccountRatingSummary(accountId);
 
   return {
-    ...raw,
+    ...attachAccountImageUrls(raw),
     ratingAverage: rating.ratingAverage,
     ratingCount: rating.ratingCount,
   };
@@ -1688,7 +1728,7 @@ const enrichDriverAccountObject = async (accountObject) => {
   ]);
 
   return {
-    ...raw,
+    ...attachAccountImageUrls(raw),
     ratingAverage: profile?.ratingAverage || rating.ratingAverage,
     ratingCount: profile?.ratingCount || rating.ratingCount,
     driverProfile: profile
@@ -1710,6 +1750,10 @@ const buildEnrichedOffer = async (offerDoc) => {
     offer.driverAccountId = await enrichDriverAccountObject(
       offer.driverAccountId,
     );
+  }
+
+  if (offer.driverVehicleId && typeof offer.driverVehicleId === "object") {
+    offer.driverVehicleId = attachVehicleImageUrls(offer.driverVehicleId);
   }
 
   return offer;
@@ -1758,6 +1802,15 @@ const loadEnrichedRequestById = async ({
   ) {
     request.acceptedDriverAccountId = await enrichDriverAccountObject(
       request.acceptedDriverAccountId,
+    );
+  }
+
+  if (
+    request.acceptedDriverVehicleId &&
+    typeof request.acceptedDriverVehicleId === "object"
+  ) {
+    request.acceptedDriverVehicleId = attachVehicleImageUrls(
+      request.acceptedDriverVehicleId,
     );
   }
 
