@@ -22,6 +22,7 @@ const OPTIONAL_ENV_GROUPS = [
   {
     name: 'Firebase push notifications',
     keys: [
+      'FIREBASE_SERVICE_ACCOUNT_PATH',
       'FIREBASE_SERVICE_ACCOUNT_JSON',
       'FIREBASE_PROJECT_ID',
       'FIREBASE_CLIENT_EMAIL',
@@ -182,15 +183,13 @@ const ensureDefaultNotificationTemplates = async () => {
   const docs = [];
 
   for (const template of DEFAULT_NOTIFICATION_TEMPLATES) {
-    const { targetType, type, ...insertOnlyTemplate } = template;
-
     const doc = await NotificationTemplate.findOneAndUpdate(
       { key: template.key },
       {
-        $setOnInsert: insertOnlyTemplate,
+        $setOnInsert: template,
         $set: {
-          targetType,
-          type,
+          targetType: template.targetType,
+          type: template.type,
           isActive: true,
         },
       },

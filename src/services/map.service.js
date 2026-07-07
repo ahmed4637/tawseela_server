@@ -229,6 +229,87 @@ async function getPlaceDetails({ placeId, sessionToken }) {
   };
 }
 
+function getAddressComponent(result, types) {
+  const components = Array.isArray(result?.address_components)
+    ? result.address_components
+    : [];
+
+  const match = components.find((component) => {
+    const componentTypes = Array.isArray(component.types) ? component.types : [];
+    return types.some((type) => componentTypes.includes(type));
+  });
+
+  return match?.long_name || match?.short_name || '';
+}
+
+function hasAnyType(result, types) {
+  const resultTypes = Array.isArray(result?.types) ? result.types : [];
+  return types.some((type) => resultTypes.includes(type));
+}
+
+function scoreReverseGeocodeResult(result) {
+  let score = 0;
+
+  if (hasAnyType(result, ['street_address', 'premise', 'subpremise'])) score += 120;
+  if (hasAnyType(result, ['point_of_interest', 'establishment'])) score += 95;
+  if (hasAnyType(result, ['route', 'intersection'])) score += 80;
+  if (hasAnyType(result, ['neighborhood', 'sublocality', 'sublocality_level_1'])) score += 55;
+  if (hasAnyType(result, ['locality'])) score += 15;
+  if (hasAnyType(result, ['administrative_area_level_1', 'administrative_area_level_2', 'country'])) score -= 35;
+
+  const formatted = String(result?.formatted_address || '');
+  const commaParts = formatted.split(',').map((item) => item.trim()).filter(Boolean);
+
+  score += Math.min(commaParts.length, 5) * 4;
+
+  return score;
+}
+
+function buildDetailedAddress(result, point) {
+  if (!result) {
+    return {
+      name: '',
+      address: `موقع محدد على الخريطة ${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`,
+    };
+  }
+
+  const streetNumber = getAddressComponent(result, ['street_number']);
+  const route = getAddressComponent(result, ['route']);
+  const premise = getAddressComponent(result, ['premise', 'subpremise']);
+  const poi = getAddressComponent(result, ['point_of_interest', 'establishment']);
+  const neighborhood = getAddressComponent(result, ['neighborhood']);
+  const sublocality = getAddressComponent(result, [
+    'sublocality_level_1',
+    'sublocality',
+    'political',
+  ]);
+  const locality = getAddressComponent(result, ['locality']);
+  const area2 = getAddressComponent(result, ['administrative_area_level_2']);
+
+  const street = [streetNumber, route].filter(Boolean).join(' ');
+  const name = poi || premise || street || neighborhood || sublocality || locality || '';
+
+  const parts = [
+    poi || premise || street,
+    neighborhood,
+    sublocality,
+    locality,
+    area2,
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .filter((item, index, arr) => arr.indexOf(item) === index);
+
+  let address = parts.join('، ');
+
+  if (!address) {
+    address = result.formatted_address ||
+      `موقع محدد على الخريطة ${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`;
+  }
+
+  return { name, address };
+}
+
 async function reverseGeocode({ lat, lng }) {
   ensureGoogleKey();
 
@@ -239,19 +320,34 @@ async function reverseGeocode({ lat, lng }) {
   url.searchParams.set('latlng', `${point.lat},${point.lng}`);
   url.searchParams.set('language', 'ar');
   url.searchParams.set('region', MAPS_COUNTRY_CODE.toLowerCase());
+  url.searchParams.set('result_type', [
+    'street_address',
+    'premise',
+    'point_of_interest',
+    'establishment',
+    'route',
+    'intersection',
+    'neighborhood',
+    'sublocality',
+    'locality',
+  ].join('|'));
   url.searchParams.set('key', GOOGLE_MAPS_SERVER_KEY);
 
   const data = await fetchJson(url.toString());
 
-  const first = Array.isArray(data.results) ? data.results[0] : null;
+  const results = Array.isArray(data.results) ? data.results : [];
+  const best = results
+    .slice()
+    .sort((a, b) => scoreReverseGeocodeResult(b) - scoreReverseGeocodeResult(a))[0];
+  const detailed = buildDetailedAddress(best, point);
 
   return {
-    address:
-      first?.formatted_address ||
-      `موقع محدد على الخريطة ${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`,
+    name: detailed.name,
+    address: detailed.address,
     latitude: point.lat,
     longitude: point.lng,
-    placeId: first?.place_id || '',
+    placeId: best?.place_id || '',
+    formattedAddress: best?.formatted_address || detailed.address,
   };
 }
 

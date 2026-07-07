@@ -1,6 +1,9 @@
 const Notification = require('../models/notification.model');
 const DeviceToken = require('../models/deviceToken.model');
 const NotificationTemplate = require('../models/notificationTemplate.model');
+const fs = require('fs');
+const path = require('path');
+
 const { emitToAccount } = require('../sockets/socket.server');
 
 let firebaseAppInitialized = false;
@@ -47,7 +50,18 @@ const getFirebaseAdmin = () => {
 
     let credential = null;
 
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
+      const serviceAccountPath = path.resolve(process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
+      if (!fs.existsSync(serviceAccountPath)) {
+        firebaseInitError = `Firebase service account file not found: ${serviceAccountPath}`;
+        firebaseAdmin = null;
+        return null;
+      }
+
+      // eslint-disable-next-line import/no-dynamic-require, global-require
+      const serviceAccount = require(serviceAccountPath);
+      credential = firebaseAdmin.credential.cert(serviceAccount);
+    } else if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
       credential = firebaseAdmin.credential.cert(serviceAccount);
     } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
@@ -64,7 +78,10 @@ const getFirebaseAdmin = () => {
       return null;
     }
 
-    firebaseAdmin.initializeApp({ credential });
+    firebaseAdmin.initializeApp({
+      credential,
+      projectId: process.env.FIREBASE_PROJECT_ID || undefined,
+    });
     return firebaseAdmin;
   } catch (error) {
     firebaseInitError = error.message;
@@ -154,18 +171,27 @@ const sendPushToAccount = async ({ accountId, title, body, data = {} }) => {
       title,
       body,
     },
-    data: stringifyPushData(data),
+    data: stringifyPushData({
+      ...data,
+      title,
+      body,
+      click_action: 'FLUTTER_NOTIFICATION_CLICK',
+    }),
     android: {
       priority: 'high',
+      ttl: 60 * 60 * 1000,
       notification: {
         sound: 'default',
         channelId: 'tawseela_general',
+        clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+        tag: data?.serviceRequestId?.toString() || data?.notificationId?.toString() || undefined,
       },
     },
     apns: {
       payload: {
         aps: {
           sound: 'default',
+          contentAvailable: true,
         },
       },
     },
