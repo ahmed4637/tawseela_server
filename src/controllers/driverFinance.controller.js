@@ -278,7 +278,12 @@ const listSettlementsByAdmin = asyncHandler(async (req, res) => {
     query.driverAccountId = req.query.driverAccountId;
   }
 
-  const docs = await SettlementRequest.find(query).sort({ createdAt: -1 }).limit(300);
+  const docs = await SettlementRequest.find(query)
+    .populate('driverAccountId', 'name phone email isActive')
+    .populate('driverProfileId', 'reviewStatus commissionDebt commissionDebtLimit isBlockedForDebt')
+    .populate('reviewedByAdminId', 'name phone email')
+    .sort({ createdAt: -1 })
+    .limit(300);
 
   return sendSuccess({
     res,
@@ -379,7 +384,11 @@ const listDebtSnapshotsByAdmin = asyncHandler(async (req, res) => {
     query.driverAccountId = req.query.driverAccountId;
   }
 
-  const docs = await DriverDebtSnapshot.find(query).sort({ createdAt: -1 }).limit(300);
+  const docs = await DriverDebtSnapshot.find(query)
+    .populate('driverAccountId', 'name phone email isActive')
+    .populate('adminAccountId', 'name phone email')
+    .sort({ createdAt: -1 })
+    .limit(300);
 
   return sendSuccess({
     res,
