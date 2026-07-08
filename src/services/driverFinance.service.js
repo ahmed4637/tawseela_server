@@ -76,6 +76,16 @@ const syncDriverProfileDebt = async ({ driverProfile, wallet }) => {
   driverProfile.commissionDebtLimit = roundMoney(wallet.debtLimit);
   driverProfile.refreshDebtBlockStatus();
 
+  if (driverProfile.isBlockedForDebt || driverProfile.commissionDebt >= driverProfile.commissionDebtLimit) {
+    driverProfile.isBlockedForDebt = true;
+    driverProfile.blockedReason = driverProfile.blockedReason || 'تم إيقاف استقبال الرحلات بسبب مستحقات التطبيق';
+    driverProfile.isOnline = false;
+    driverProfile.isAvailable = false;
+  } else {
+    driverProfile.isBlockedForDebt = false;
+    driverProfile.blockedReason = '';
+  }
+
   await driverProfile.save();
 
   return driverProfile;

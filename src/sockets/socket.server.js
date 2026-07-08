@@ -10,7 +10,6 @@ const {
   getRoomForRequest,
   ensureChatRoomAccess,
   createChatMessage,
-  getUnreadCountForRoom,
   markRoomMessagesAsRead,
 } = require("../services/chat.service");
 const {
@@ -48,10 +47,6 @@ const getSocketToken = (socket) => {
 
 const isValidObjectId = (value) => {
   return mongoose.Types.ObjectId.isValid(value?.toString() || "");
-};
-
-const readObjectId = (value) => {
-  return (value?._id || value || "").toString();
 };
 
 const getIO = () => {
@@ -567,25 +562,15 @@ const initSocketServer = (httpServer) => {
           location: payload.location,
         });
 
-        const receiverId = readObjectId(message.receiverAccountId);
-        const senderId = readObjectId(message.senderAccountId);
-        const { unreadCount } = receiverId
-          ? await getUnreadCountForRoom({
-              roomId: room._id,
-              accountId: receiverId,
-              roles: [],
-            })
-          : { unreadCount: 0 };
+        const receiverId = (
+          message.receiverAccountId?._id || message.receiverAccountId || ""
+        ).toString();
 
         const chatPayload = {
           room,
           message,
           serviceRequestId: room.serviceRequestId,
           requestId: room.serviceRequestId,
-          senderAccountId: senderId,
-          receiverAccountId: receiverId,
-          unreadCount,
-          unreadCountForReceiver: unreadCount,
         };
 
         ioInstance.to(getChatRoom(room._id)).emit("chat:message-new", chatPayload);
@@ -614,7 +599,6 @@ const initSocketServer = (httpServer) => {
                   serviceRequestId: room.serviceRequestId,
                   requestId: room.serviceRequestId,
                   messageId: message._id,
-                  unreadCount,
                 },
               });
             } catch (error) {
@@ -664,7 +648,6 @@ const initSocketServer = (httpServer) => {
 
         ioInstance.to(getChatRoom(room._id)).emit("chat:messages-read", readPayload);
         emitToRequest(room.serviceRequestId.toString(), "chat:messages-read", readPayload);
-        emitToAccount(socket.accountId, "chat:messages-read", readPayload);
 
         if (callback) {
           callback({
@@ -732,11 +715,18 @@ const initSocketServer = (httpServer) => {
 
         driverProfile.refreshDebtBlockStatus();
 
-        if (driverProfile.isBlockedForDebt) {
-          throw new Error(
-            driverProfile.blockedReason ||
-              "تم إيقاف استقبال الرحلات بسبب مستحقات التطبيق",
-          );
+        if (
+          driverProfile.isBlockedForDebt ||
+          Number(driverProfile.commissionDebt || 0) >= Number(driverProfile.commissionDebtLimit || 0)
+        ) {
+          driverProfile.isBlockedForDebt = true;
+          driverProfile.blockedReason = driverProfile.blockedReason ||
+            "تم إيقاف استقبال الرحلات بسبب مستحقات التطبيق";
+          driverProfile.isOnline = false;
+          driverProfile.isAvailable = false;
+          await driverProfile.save();
+
+          throw new Error(driverProfile.blockedReason);
         }
 
         driverProfile.isOnline = true;

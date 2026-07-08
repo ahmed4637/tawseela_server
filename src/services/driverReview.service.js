@@ -1,9 +1,11 @@
 const DriverProfile = require('../models/driverProfile.model');
 const DriverVehicle = require('../models/driverVehicle.model');
 const DriverReviewLog = require('../models/driverReviewLog.model');
+const DriverWallet = require('../models/driverWallet.model');
 const { createAdminAuditLog } = require('./adminAuditLog.service');
 const { createNotification } = require('./notification.service');
 const { emitToAccount } = require('../sockets/socket.server');
+const { getActiveRestrictions } = require('./penalty.service');
 
 const normalizeReason = (reason, fallback = '') => {
   const cleanReason = reason ? reason.toString().trim() : '';
@@ -469,43 +471,135 @@ const rejectOrRequestUpdateDriverVehicle = async ({
   return vehicle;
 };
 
+const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
+
+const buildDebtSnapshotForProfile = async (profile) => {
+  if (!profile) {
+    return {
+      debtAmount: 0,
+      debtLimit: 200,
+      remainingAllowedDebt: 200,
+      debtPercent: 0,
+      isBlockedForDebt: false,
+      blockedReason: '',
+      wallet: null,
+    };
+  }
+
+  const wallet = await DriverWallet.findOne({ driverAccountId: profile.accountId });
+
+  const debtAmount = roundMoney(wallet?.debtAmount ?? profile.commissionDebt ?? 0);
+  const debtLimit = roundMoney(wallet?.debtLimit ?? profile.commissionDebtLimit ?? 200);
+  const isBlockedForDebt = debtLimit > 0 && debtAmount >= debtLimit;
+  const remainingAllowedDebt = roundMoney(Math.max(debtLimit - debtAmount, 0));
+  const debtPercent = debtLimit > 0
+    ? Math.min(Math.round((debtAmount / debtLimit) * 100), 100)
+    : 0;
+
+  profile.commissionDebt = debtAmount;
+  profile.commissionDebtLimit = debtLimit;
+  profile.isBlockedForDebt = isBlockedForDebt;
+  profile.blockedReason = isBlockedForDebt
+    ? 'تم إيقاف استقبال الرحلات بسبب وصول مستحقات التطبيق للحد المسموح'
+    : '';
+
+  if (isBlockedForDebt) {
+    profile.isOnline = false;
+    profile.isAvailable = false;
+  }
+
+  await profile.save();
+
+  return {
+    debtAmount,
+    debtLimit,
+    remainingAllowedDebt,
+    debtPercent,
+    isBlockedForDebt,
+    blockedReason: profile.blockedReason || '',
+    wallet,
+  };
+};
+
 const buildDriverReviewStatus = async (accountId) => {
-  const [profile, vehicles, logs] = await Promise.all([
+  const [profile, vehicles, logs, activeRestrictions] = await Promise.all([
     DriverProfile.findOne({ accountId }),
     DriverVehicle.find({ accountId, isActive: true }).sort({ isDefault: -1, createdAt: -1 }),
     DriverReviewLog.find({ accountId })
       .sort({ createdAt: -1 })
       .limit(20),
+    getActiveRestrictions({
+      accountId,
+      restrictionTypes: ['app_usage', 'driver_online', 'receiving_requests'],
+    }),
   ]);
 
-  const approvedVehiclesCount = vehicles.filter(
+  const debt = await buildDebtSnapshotForProfile(profile);
+
+  const approvedVehicles = vehicles.filter(
     (vehicle) => vehicle.isApproved && vehicle.reviewStatus === 'approved'
-  ).length;
+  );
+
+  const approvedVehiclesCount = approvedVehicles.length;
+  const selectedVehicle = approvedVehicles.find((vehicle) => vehicle.isDefault) || approvedVehicles[0] || vehicles[0] || null;
+  const hasActiveRestriction = activeRestrictions.length > 0;
+  const restrictionReason = activeRestrictions[0]?.reason || 'يوجد إجراء على الحساب يمنع استقبال الطلبات حاليا';
+  const isProfileReady = Boolean(
+    profile &&
+      profile.isActive !== false &&
+      profile.isApproved &&
+      profile.reviewStatus === 'approved'
+  );
 
   const canGoOnline = Boolean(
-    profile &&
-      profile.isApproved &&
-      profile.reviewStatus === 'approved' &&
+    isProfileReady &&
       approvedVehiclesCount > 0 &&
-      !profile.isBlockedForDebt
+      !debt.isBlockedForDebt &&
+      !hasActiveRestriction &&
+      !profile.activeServiceRequestId
   );
 
   return {
     driverProfile: profile,
     driverVehicles: vehicles,
     approvedVehiclesCount,
+    hasApprovedVehicle: approvedVehiclesCount > 0,
+    selectedVehicle,
     canGoOnline,
+    canReceiveRequests: canGoOnline,
     reviewLogs: logs,
+    activeRestrictions,
+    debtAmount: debt.debtAmount,
+    debtLimit: debt.debtLimit,
+    remainingAllowedDebt: debt.remainingAllowedDebt,
+    debtPercent: debt.debtPercent,
+    isBlockedForDebt: debt.isBlockedForDebt,
+    blockedReason: debt.blockedReason,
+    displayMessage: canGoOnline
+      ? 'تمت الموافقة ويمكنك استقبال الطلبات'
+      : debt.isBlockedForDebt
+        ? debt.blockedReason
+        : hasActiveRestriction
+          ? restrictionReason
+          : profile?.activeServiceRequestId
+            ? 'لديك طلب نشط بالفعل. أكمل الطلب الحالي أولا'
+            : '',
     blockingReasons: {
       profile: !profile
         ? 'ملف السائق غير موجود'
-        : profile.reviewStatus !== 'approved'
-          ? profile.rejectionReason || 'ملف السائق تحت المراجعة'
-          : '',
+        : profile.isActive === false
+          ? 'حساب السائق غير مفعل'
+          : profile.reviewStatus !== 'approved'
+            ? profile.rejectionReason || 'ملف السائق تحت المراجعة'
+            : '',
       vehicle: approvedVehiclesCount === 0
         ? 'لا توجد مركبة مقبولة ونشطة'
         : '',
-      debt: profile?.isBlockedForDebt ? profile.blockedReason : '',
+      debt: debt.isBlockedForDebt ? debt.blockedReason : '',
+      restriction: hasActiveRestriction ? restrictionReason : '',
+      activeRequest: profile?.activeServiceRequestId
+        ? 'لديك طلب نشط بالفعل. أكمل الطلب الحالي أولا'
+        : '',
     },
   };
 };
