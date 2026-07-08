@@ -84,6 +84,31 @@ router.put(
     body('appStatus.maintenanceMessage')
       .optional({ checkFalsy: true })
       .trim(),
+
+    body('appStatus.isUpdateCheckEnabled')
+      .optional()
+      .isBoolean()
+      .withMessage('حالة فحص التحديث غير صحيحة'),
+
+    body('appStatus.androidMinimumVersion')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('appStatus.androidLatestVersion')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('appStatus.androidUpdateUrl')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('appStatus.forceUpdateMessage')
+      .optional({ checkFalsy: true })
+      .trim(),
+
+    body('appStatus.softUpdateMessage')
+      .optional({ checkFalsy: true })
+      .trim(),
   ],
   validateRequest,
   updateAdminSettings

@@ -7,6 +7,7 @@ const {
   getSupportTicketById,
   getSupportTicketMessages,
   addUserSupportMessage,
+  getMySupportUnreadCount,
 } = require('../controllers/support.controller');
 
 const validateRequest = require('../middlewares/validateRequest');
@@ -69,6 +70,8 @@ router.post(
   validateRequest,
   createSupportTicket,
 );
+
+router.get('/unread-count', getMySupportUnreadCount);
 
 router.get('/tickets', getMySupportTickets);
 

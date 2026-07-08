@@ -23,6 +23,78 @@ const emitAdminSupportEvent = (eventName, payload) => {
   }
 };
 
+const emitUserSupportEvent = (accountId, eventName, payload) => {
+  try {
+    if (!accountId) return;
+    // eslint-disable-next-line global-require
+    const { emitToAccount } = require('../sockets/socket.server');
+    emitToAccount(accountId.toString(), eventName, payload);
+  } catch (error) {
+    // Socket may be unavailable in CLI or scripts.
+  }
+};
+
+const countUserUnreadSupportMessages = async (accountId) => {
+  const tickets = await SupportTicket.find({ accountId }).select('_id');
+  const ticketIds = tickets.map((item) => item._id);
+  if (ticketIds.length === 0) return 0;
+
+  return SupportMessage.countDocuments({
+    ticketId: { $in: ticketIds },
+    senderType: 'admin',
+    readByUserAt: null,
+  });
+};
+
+const countAdminUnreadSupportMessages = async () => {
+  return SupportMessage.countDocuments({
+    senderType: 'user',
+    readByAdminAt: null,
+  });
+};
+
+const appendUnreadCountsToTickets = async ({ docs = [], forAdmin = false }) => {
+  const plainDocs = docs.map((doc) => (typeof doc.toObject === 'function' ? doc.toObject() : doc));
+  const ticketIds = plainDocs.map((doc) => doc._id).filter(Boolean);
+
+  if (ticketIds.length === 0) {
+    return plainDocs.map((doc) => ({ ...doc, unreadCount: 0 }));
+  }
+
+  const grouped = await SupportMessage.aggregate([
+    {
+      $match: {
+        ticketId: { $in: ticketIds },
+        ...(forAdmin
+          ? { senderType: 'user', readByAdminAt: null }
+          : { senderType: 'admin', readByUserAt: null }),
+      },
+    },
+    { $group: { _id: '$ticketId', count: { $sum: 1 } } },
+  ]);
+
+  const unreadByTicket = new Map(
+    grouped.map((item) => [item._id.toString(), Number(item.count) || 0]),
+  );
+
+  return plainDocs.map((doc) => ({
+    ...doc,
+    unreadCount: unreadByTicket.get(doc._id.toString()) || 0,
+  }));
+};
+
+const emitSupportUnreadCountForUser = async (accountId) => {
+  const unreadCount = await countUserUnreadSupportMessages(accountId);
+  emitUserSupportEvent(accountId, 'support:unread-count', { unreadCount });
+  return unreadCount;
+};
+
+const emitSupportUnreadCountForAdmins = async () => {
+  const unreadCount = await countAdminUnreadSupportMessages();
+  emitAdminSupportEvent('admin:support-unread-count', { unreadCount });
+  return unreadCount;
+};
+
 const populateTicket = (query) => query
   .populate('accountId', 'name phone email roles')
   .populate('relatedServiceRequestId')
@@ -86,13 +158,16 @@ const createSupportTicket = asyncHandler(async (req, res) => {
     attachments: normalizeAttachments(attachments),
   });
 
-  emitAdminSupportEvent('admin:support-ticket-created', {
+  const ticketPayload = {
     ticketId: ticket._id,
     ticketCode: ticket.ticketCode,
     priority: ticket.priority,
     status: ticket.status,
     category: ticket.category,
-  });
+  };
+
+  emitAdminSupportEvent('admin:support-ticket-created', ticketPayload);
+  await emitSupportUnreadCountForAdmins();
 
   const populatedTicket = await populateTicket(SupportTicket.findById(ticket._id));
 
@@ -129,10 +204,12 @@ const getMySupportTickets = asyncHandler(async (req, res) => {
     SupportTicket.countDocuments(query),
   ]);
 
+  const docsWithUnread = await appendUnreadCountsToTickets({ docs, forAdmin: false });
+
   return sendSuccess({
     res,
     message: 'تم جلب تذاكر الدعم الخاصة بك',
-    docs,
+    docs: docsWithUnread,
     extra: {
       pagination: {
         page: pageNumber,
@@ -185,6 +262,12 @@ const getSupportTicketMessages = asyncHandler(async (req, res) => {
     update,
   );
 
+  if (req.roles?.includes('admin')) {
+    await emitSupportUnreadCountForAdmins();
+  } else {
+    await emitSupportUnreadCountForUser(req.accountId);
+  }
+
   return sendSuccess({
     res,
     message: 'تم جلب رسائل الدعم',
@@ -213,12 +296,16 @@ const addUserSupportMessage = asyncHandler(async (req, res) => {
     attachments: normalizeAttachments(req.body.attachments || []),
   });
 
-  emitAdminSupportEvent('admin:support-message-created', {
+  const supportPayload = {
     ticketId: ticket._id,
     ticketCode: ticket.ticketCode,
     messageId: message._id,
     senderType: 'user',
-  });
+    message,
+  };
+
+  emitAdminSupportEvent('admin:support-message-created', supportPayload);
+  await emitSupportUnreadCountForAdmins();
 
   return sendSuccess({
     res,
@@ -265,10 +352,12 @@ const getAllSupportTicketsForAdmin = asyncHandler(async (req, res) => {
     SupportTicket.countDocuments(query),
   ]);
 
+  const docsWithUnread = await appendUnreadCountsToTickets({ docs, forAdmin: true });
+
   return sendSuccess({
     res,
     message: 'تم جلب تذاكر الدعم',
-    docs,
+    docs: docsWithUnread,
     extra: {
       pagination: {
         page: pageNumber,
@@ -345,6 +434,14 @@ const updateSupportTicketByAdmin = asyncHandler(async (req, res) => {
     },
   });
 
+  emitUserSupportEvent(ticket.accountId, 'support:ticket-updated', {
+    ticketId: ticket._id,
+    ticketCode: ticket.ticketCode,
+    status: ticket.status,
+    priority: ticket.priority,
+    category: ticket.category,
+  });
+
   const doc = await populateTicket(SupportTicket.findById(ticket._id));
 
   return sendSuccess({
@@ -385,12 +482,17 @@ const addAdminSupportMessage = asyncHandler(async (req, res) => {
     },
   });
 
-  emitAdminSupportEvent('admin:support-message-created', {
+  const supportPayload = {
     ticketId: ticket._id,
     ticketCode: ticket.ticketCode,
     messageId: message._id,
     senderType: 'admin',
-  });
+    message,
+  };
+
+  emitUserSupportEvent(ticket.accountId, 'support:message-new', supportPayload);
+  emitAdminSupportEvent('admin:support-message-created', supportPayload);
+  await emitSupportUnreadCountForUser(ticket.accountId);
 
   return sendSuccess({
     res,
@@ -400,13 +502,38 @@ const addAdminSupportMessage = asyncHandler(async (req, res) => {
   });
 });
 
+
+const getMySupportUnreadCount = asyncHandler(async (req, res) => {
+  const unreadCount = await countUserUnreadSupportMessages(req.accountId);
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب عدد رسائل الدعم غير المقروءة',
+    doc: { unreadCount },
+    extra: { unreadCount },
+  });
+});
+
+const getAdminSupportUnreadCount = asyncHandler(async (req, res) => {
+  const unreadCount = await countAdminUnreadSupportMessages();
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب عدد رسائل الدعم غير المقروءة للأدمن',
+    doc: { unreadCount },
+    extra: { unreadCount },
+  });
+});
+
 module.exports = {
   createSupportTicket,
   getMySupportTickets,
   getSupportTicketById,
   getSupportTicketMessages,
   addUserSupportMessage,
+  getMySupportUnreadCount,
   getAllSupportTicketsForAdmin,
   updateSupportTicketByAdmin,
   addAdminSupportMessage,
+  getAdminSupportUnreadCount,
 };

@@ -61,6 +61,10 @@ const generateRequestCode = () => {
   return `TS-${Date.now()}-${random}`;
 };
 
+const generateDeliveryHandoffOtp = () => {
+  return Math.floor(1000 + Math.random() * 9000).toString();
+};
+
 const roundMoney = (value) => {
   return Math.round((Number(value) || 0) * 100) / 100;
 };
@@ -189,7 +193,7 @@ const buildDeliveryDetailsPayload = (deliveryDetails = {}) => {
     deliveryProofNote: "",
     recipientName: dropoffContactName,
     recipientPhone: dropoffContactPhone,
-    handoffOtp: firstNonEmptyValue(deliveryDetails.handoffOtp),
+    handoffOtp: firstNonEmptyValue(deliveryDetails.handoffOtp) || generateDeliveryHandoffOtp(),
     paymentNotes: firstNonEmptyValue(
       deliveryDetails.paymentNotes,
       deliveryDetails.paymentNote,
@@ -905,7 +909,9 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     statusCode: 201,
     message: serviceType === "scheduled_ride"
       ? "تم إنشاء الحجز وإرساله للسائقين المؤهلين"
-      : "تم إنشاء الطلب بنجاح وفي انتظار عروض السائقين",
+      : serviceType === "delivery_order"
+        ? "تم إنشاء طلب التوصيل بنجاح وفي انتظار عروض السائقين"
+        : "تم إنشاء الطلب بنجاح وفي انتظار عروض السائقين",
     doc,
   });
 });

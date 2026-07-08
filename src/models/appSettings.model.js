@@ -162,6 +162,41 @@ const appSettingsSchema = new mongoose.Schema(
         trim: true,
         default: 'التطبيق تحت الصيانة حاليًا',
       },
+
+      isUpdateCheckEnabled: {
+        type: Boolean,
+        default: true,
+      },
+
+      androidMinimumVersion: {
+        type: String,
+        trim: true,
+        default: '1.0.0',
+      },
+
+      androidLatestVersion: {
+        type: String,
+        trim: true,
+        default: '1.0.0',
+      },
+
+      androidUpdateUrl: {
+        type: String,
+        trim: true,
+        default: '',
+      },
+
+      forceUpdateMessage: {
+        type: String,
+        trim: true,
+        default: 'يوجد تحديث جديد مطلوب لتشغيل تطبيق توصيلة بأمان',
+      },
+
+      softUpdateMessage: {
+        type: String,
+        trim: true,
+        default: 'يوجد إصدار أحدث من تطبيق توصيلة',
+      },
     },
 
     loyalty: {

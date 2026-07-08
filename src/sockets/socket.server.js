@@ -113,6 +113,9 @@ const STATIC_EVENT_ALIASES = Object.freeze({
   "driver:location-updated": ["location.driver.updated", "tracking.location.updated"],
 
   "notification:new": ["notification.created"],
+
+  "safety:incident-created": ["safety.incident.created", "admin.safety.incident.created"],
+  "safety:incident-updated": ["safety.incident.updated", "admin.safety.incident.updated"],
 });
 
 const REQUEST_STATUS_EVENT_ALIASES = Object.freeze({

@@ -7,6 +7,7 @@ const {
   getSupportTicketMessages,
   updateSupportTicketByAdmin,
   addAdminSupportMessage,
+  getAdminSupportUnreadCount,
 } = require('../controllers/support.controller');
 
 const validateRequest = require('../middlewares/validateRequest');
@@ -30,6 +31,8 @@ const priorities = ['low', 'medium', 'high', 'urgent'];
 const statuses = ['open', 'pending_user', 'pending_admin', 'resolved', 'closed'];
 
 router.use(protect, allowRoles('admin'));
+
+router.get('/unread-count', getAdminSupportUnreadCount);
 
 router.get('/tickets', getAllSupportTicketsForAdmin);
 
