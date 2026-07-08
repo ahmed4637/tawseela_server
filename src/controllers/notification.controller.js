@@ -10,6 +10,8 @@ const {
   createNotification,
   registerDeviceToken,
   deactivateDeviceToken,
+  getUnreadNotificationCount,
+  emitNotificationUnreadCount,
 } = require('../services/notification.service');
 const { createAdminAuditLog } = require('../services/adminAuditLog.service');
 
@@ -31,6 +33,21 @@ const buildPagination = ({ page = 1, limit = 30, total = 0 }) => {
     },
   };
 };
+
+const getMyUnreadNotificationsCount = asyncHandler(async (req, res) => {
+  const unreadCount = await getUnreadNotificationCount(req.accountId);
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب عدد الإشعارات غير المقروءة بنجاح',
+    doc: {
+      unreadCount,
+    },
+    extra: {
+      unreadCount,
+    },
+  });
+});
 
 const getMyNotifications = asyncHandler(async (req, res) => {
   const { unreadOnly, page = 1, limit = 30, type } = req.query;
@@ -105,10 +122,15 @@ const markNotificationAsRead = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  const unreadCount = await emitNotificationUnreadCount(req.accountId);
+
   return sendSuccess({
     res,
     message: 'تم تعليم الإشعار كمقروء',
     doc,
+    extra: {
+      unreadCount,
+    },
   });
 });
 
@@ -124,9 +146,17 @@ const markAllNotificationsAsRead = asyncHandler(async (req, res) => {
     }
   );
 
+  const unreadCount = await emitNotificationUnreadCount(req.accountId);
+
   return sendSuccess({
     res,
     message: 'تم تعليم كل الإشعارات كمقروءة',
+    doc: {
+      unreadCount,
+    },
+    extra: {
+      unreadCount,
+    },
   });
 });
 
@@ -446,6 +476,7 @@ const sendAdminNotification = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  getMyUnreadNotificationsCount,
   getMyNotifications,
   markNotificationAsRead,
   markAllNotificationsAsRead,

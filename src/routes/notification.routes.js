@@ -2,6 +2,7 @@ const express = require('express');
 const { body, param } = require('express-validator');
 
 const {
+  getMyUnreadNotificationsCount,
   getMyNotifications,
   markNotificationAsRead,
   markAllNotificationsAsRead,
@@ -17,6 +18,7 @@ const router = express.Router();
 
 router.use(protect);
 
+router.get('/unread-count', getMyUnreadNotificationsCount);
 router.get('/', getMyNotifications);
 router.get('/device-tokens', getMyDeviceTokens);
 

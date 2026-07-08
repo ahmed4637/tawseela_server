@@ -249,10 +249,42 @@ const sendPushToAccount = async ({ accountId, title, body, data = {} }) => {
   }
 };
 
-const emitNotificationSocket = ({ accountId, notification }) => {
+const getUnreadNotificationCount = async (accountId) => {
+  if (!accountId) return 0;
+
+  return Notification.countDocuments({
+    accountId,
+    isRead: false,
+  });
+};
+
+const emitNotificationUnreadCount = async (accountId) => {
+  if (!accountId) return 0;
+
+  const unreadCount = await getUnreadNotificationCount(accountId);
+
   try {
+    emitToAccount(accountId.toString(), 'notification:unread-count', {
+      unreadCount,
+    });
+  } catch (error) {
+    console.error('Notification unread count socket error:', error.message);
+  }
+
+  return unreadCount;
+};
+
+const emitNotificationSocket = async ({ accountId, notification }) => {
+  try {
+    const unreadCount = await getUnreadNotificationCount(accountId);
+
     emitToAccount(accountId.toString(), 'notification:new', {
       notification,
+      unreadCount,
+    });
+
+    emitToAccount(accountId.toString(), 'notification:unread-count', {
+      unreadCount,
     });
   } catch (error) {
     console.error('Notification socket error:', error.message);
@@ -278,7 +310,7 @@ const createNotification = async ({
     pushStatus: sendPush ? 'pending' : 'not_requested',
   });
 
-  emitNotificationSocket({ accountId, notification });
+  await emitNotificationSocket({ accountId, notification });
 
   if (!sendPush) {
     return notification;
@@ -435,4 +467,6 @@ module.exports = {
   deactivateDeviceToken,
   sendPushToAccount,
   getFirebaseAdmin,
+  getUnreadNotificationCount,
+  emitNotificationUnreadCount,
 };
