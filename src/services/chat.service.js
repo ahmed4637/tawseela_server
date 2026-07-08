@@ -95,7 +95,7 @@ const createChatRoomForAcceptedRequest = async ({ request, offer }) => {
 const getRoomForRequest = async ({ serviceRequestId, accountId, roles = [] }) => {
   ensureValidObjectId(serviceRequestId, 'رقم الطلب غير صحيح');
 
-  const room = await ChatRoom.findOne({ serviceRequestId });
+  let room = await ChatRoom.findOne({ serviceRequestId });
 
   if (!room) {
     const request = await ServiceRequest.findById(serviceRequestId).select(
@@ -307,6 +307,51 @@ const createChatMessage = async ({
   };
 };
 
+
+const getUnreadCountForRoom = async ({ roomId, accountId, roles = [] }) => {
+  const room = await ensureChatRoomAccess({ roomId, accountId, roles });
+
+  if (roles.includes('admin')) {
+    return {
+      room,
+      unreadCount: 0,
+    };
+  }
+
+  const unreadCount = await ChatMessage.countDocuments({
+    roomId: room._id,
+    receiverAccountId: accountId,
+    isRead: false,
+  });
+
+  return {
+    room,
+    unreadCount,
+  };
+};
+
+const getUnreadCountForRequest = async ({ serviceRequestId, accountId, roles = [] }) => {
+  const room = await getRoomForRequest({ serviceRequestId, accountId, roles });
+
+  if (roles.includes('admin')) {
+    return {
+      room,
+      unreadCount: 0,
+    };
+  }
+
+  const unreadCount = await ChatMessage.countDocuments({
+    roomId: room._id,
+    receiverAccountId: accountId,
+    isRead: false,
+  });
+
+  return {
+    room,
+    unreadCount,
+  };
+};
+
 const markRoomMessagesAsRead = async ({ roomId, accountId, roles = [] }) => {
   const room = await ensureChatRoomAccess({ roomId, accountId, roles });
 
@@ -341,6 +386,8 @@ module.exports = {
   ensureChatRoomAccess,
   getMessagesForRoom,
   createChatMessage,
+  getUnreadCountForRoom,
+  getUnreadCountForRequest,
   markRoomMessagesAsRead,
   toPlainObject,
 };

@@ -5,6 +5,8 @@ const {
   getChatRoomByRequest,
   getChatRoomById,
   getChatMessages,
+  getChatUnreadCountByRequest,
+  getChatUnreadCountByRoom,
   sendChatMessage,
   markChatRoomAsRead,
 } = require('../controllers/chat.controller');
@@ -26,6 +28,18 @@ router.get(
   getChatRoomByRequest
 );
 
+
+router.get(
+  '/requests/:serviceRequestId/unread-count',
+  [
+    param('serviceRequestId')
+      .isMongoId()
+      .withMessage('رقم الطلب غير صحيح'),
+  ],
+  validateRequest,
+  getChatUnreadCountByRequest
+);
+
 router.get(
   '/rooms/:roomId',
   [
@@ -35,6 +49,18 @@ router.get(
   ],
   validateRequest,
   getChatRoomById
+);
+
+
+router.get(
+  '/rooms/:roomId/unread-count',
+  [
+    param('roomId')
+      .isMongoId()
+      .withMessage('رقم غرفة الشات غير صحيح'),
+  ],
+  validateRequest,
+  getChatUnreadCountByRoom
 );
 
 router.get(
