@@ -6,6 +6,7 @@ const {
   getTrackingSettings,
   getLatestDriverLocationForRequest,
   getRequestLocationHistory,
+  updateDriverLiveLocation,
 } = require('../services/tracking.service');
 
 const TRACKING_FIELDS = [
@@ -43,6 +44,40 @@ const getRequestLatestDriverLocation = asyncHandler(async (req, res) => {
       request: data.request,
       driverProfile: data.driverProfile,
     },
+  });
+});
+
+
+const updateMyDriverLocationForRequest = asyncHandler(async (req, res) => {
+  const roles = req.roles || [];
+
+  if (!roles.includes('driver')) {
+    const error = new Error('هذا الإجراء متاح للسائق فقط');
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const data = await updateDriverLiveLocation({
+    accountId: req.accountId,
+    requestId: req.params.serviceRequestId,
+    lat: req.body.lat,
+    lng: req.body.lng,
+    latitude: req.body.latitude,
+    longitude: req.body.longitude,
+    speed: req.body.speed,
+    heading: req.body.heading,
+    accuracy: req.body.accuracy,
+    metadata: {
+      source: 'rest_fallback',
+      platform: req.body.platform || null,
+      appVersion: req.body.appVersion || null,
+    },
+  });
+
+  return sendSuccess({
+    res,
+    message: 'تم تحديث موقع السائق بنجاح',
+    doc: data.locationPayload,
   });
 });
 
@@ -139,6 +174,7 @@ module.exports = {
   getPublicTrackingSettings,
   getRequestLatestDriverLocation,
   getMyRequestLocationHistory,
+  updateMyDriverLocationForRequest,
   getAdminTrackingSettings,
   updateAdminTrackingSettings,
   getAdminRequestLocationHistory,

@@ -452,7 +452,7 @@ const approveDriverProfile = asyncHandler(async (req, res) => {
   const doc = await approveDriverProfileReview({
     driverProfileId,
     req,
-    reason: req.body.reason || '',
+    reason: req.body?.reason || '',
   });
 
   return sendSuccess({
@@ -561,7 +561,7 @@ const approveDriverVehicle = asyncHandler(async (req, res) => {
   const doc = await approveDriverVehicleReview({
     driverVehicleId,
     req,
-    reason: req.body.reason || '',
+    reason: req.body?.reason || '',
   });
 
   return sendSuccess({

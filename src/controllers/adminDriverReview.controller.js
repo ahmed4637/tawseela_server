@@ -117,7 +117,7 @@ const approveDriverProfileForAdmin = asyncHandler(async (req, res) => {
   const doc = await approveDriverProfile({
     driverProfileId,
     req,
-    reason: req.body.reason || '',
+    reason: req.body?.reason || '',
   });
 
   return sendSuccess({
@@ -134,7 +134,7 @@ const rejectDriverProfileForAdmin = asyncHandler(async (req, res) => {
   const doc = await rejectOrRequestUpdateDriverProfile({
     driverProfileId,
     req,
-    reason: req.body.rejectionReason || req.body.reason || '',
+    reason: req.body.rejectionReason || req.body?.reason || '',
     action: 'rejected',
   });
 
@@ -152,7 +152,7 @@ const requestDriverProfileUpdateForAdmin = asyncHandler(async (req, res) => {
   const doc = await rejectOrRequestUpdateDriverProfile({
     driverProfileId,
     req,
-    reason: req.body.reason || req.body.rejectionReason || '',
+    reason: req.body?.reason || req.body.rejectionReason || '',
     action: 'needs_update',
   });
 
@@ -250,7 +250,7 @@ const approveDriverVehicleForAdmin = asyncHandler(async (req, res) => {
   const doc = await approveDriverVehicle({
     driverVehicleId,
     req,
-    reason: req.body.reason || '',
+    reason: req.body?.reason || '',
   });
 
   return sendSuccess({
@@ -267,7 +267,7 @@ const rejectDriverVehicleForAdmin = asyncHandler(async (req, res) => {
   const doc = await rejectOrRequestUpdateDriverVehicle({
     driverVehicleId,
     req,
-    reason: req.body.rejectionReason || req.body.reason || '',
+    reason: req.body.rejectionReason || req.body?.reason || '',
     action: 'rejected',
   });
 
@@ -285,7 +285,7 @@ const requestDriverVehicleUpdateForAdmin = asyncHandler(async (req, res) => {
   const doc = await rejectOrRequestUpdateDriverVehicle({
     driverVehicleId,
     req,
-    reason: req.body.reason || req.body.rejectionReason || '',
+    reason: req.body?.reason || req.body.rejectionReason || '',
     action: 'needs_update',
   });
 

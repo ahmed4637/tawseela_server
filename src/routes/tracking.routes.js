@@ -1,10 +1,11 @@
 const express = require('express');
-const { param, query } = require('express-validator');
+const { body, param, query } = require('express-validator');
 
 const {
   getPublicTrackingSettings,
   getRequestLatestDriverLocation,
   getMyRequestLocationHistory,
+  updateMyDriverLocationForRequest,
 } = require('../controllers/tracking.controller');
 
 const validateRequest = require('../middlewares/validateRequest');
@@ -25,6 +26,38 @@ router.get(
   ],
   validateRequest,
   getRequestLatestDriverLocation
+);
+
+
+router.post(
+  '/requests/:serviceRequestId/driver-location',
+  [
+    param('serviceRequestId')
+      .isMongoId()
+      .withMessage('رقم الطلب غير صحيح'),
+
+    body('lat')
+      .optional()
+      .isFloat({ min: -90, max: 90 })
+      .withMessage('خط عرض الموقع غير صحيح'),
+
+    body('lng')
+      .optional()
+      .isFloat({ min: -180, max: 180 })
+      .withMessage('خط طول الموقع غير صحيح'),
+
+    body('latitude')
+      .optional()
+      .isFloat({ min: -90, max: 90 })
+      .withMessage('خط عرض الموقع غير صحيح'),
+
+    body('longitude')
+      .optional()
+      .isFloat({ min: -180, max: 180 })
+      .withMessage('خط طول الموقع غير صحيح'),
+  ],
+  validateRequest,
+  updateMyDriverLocationForRequest
 );
 
 router.get(
