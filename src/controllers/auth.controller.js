@@ -12,6 +12,7 @@ const { buildPublicUrl } = require('../utils/publicUrl');
 const { getDriverCommissionDebtLimit } = require('../services/appSettings.service');
 const { getOrCreateLoyaltyAccount } = require('../services/loyalty.service');
 const { getEffectiveAdminAccess } = require('../services/adminAccess.service');
+const { assertNoActiveRestriction } = require('../services/penalty.service');
 const {
   buildDriverReviewStatus,
   markDriverProfileResubmitted,
@@ -798,6 +799,148 @@ const updateMe = asyncHandler(async (req, res) => {
 });
 
 
+const readCoordinate = (value, fieldName) => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) {
+    const error = new Error(`${fieldName} غير صحيح`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return number;
+};
+
+const setDriverOnline = asyncHandler(async (req, res) => {
+  if (!req.account.roles.includes('driver')) {
+    const error = new Error('هذا الإجراء متاح للسائق فقط');
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const lat = readCoordinate(req.body.lat ?? req.body.latitude, 'خط العرض');
+  const lng = readCoordinate(req.body.lng ?? req.body.longitude, 'خط الطول');
+  const hasLocation = lat !== null && lng !== null;
+
+  if ((lat === null) !== (lng === null)) {
+    const error = new Error('بيانات الموقع غير مكتملة');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const driverProfile = await DriverProfile.findOne({ accountId: req.account._id });
+
+  if (!driverProfile) {
+    const error = new Error('ملف السائق غير موجود');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  await assertNoActiveRestriction({
+    accountId: req.account._id,
+    restrictionTypes: ['app_usage', 'driver_online', 'receiving_requests'],
+  });
+
+  if (!driverProfile.isApproved || driverProfile.reviewStatus !== 'approved') {
+    const error = new Error('حساب السائق لم تتم الموافقة عليه بعد');
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const approvedVehicleCount = await DriverVehicle.countDocuments({
+    accountId: req.account._id,
+    isActive: true,
+    isApproved: true,
+    reviewStatus: 'approved',
+  });
+
+  if (approvedVehicleCount === 0) {
+    const error = new Error('لا يمكن فتح Online قبل اعتماد مركبة واحدة على الأقل');
+    error.statusCode = 403;
+    throw error;
+  }
+
+  driverProfile.refreshDebtBlockStatus();
+
+  if (
+    driverProfile.isBlockedForDebt ||
+    Number(driverProfile.commissionDebt || 0) >= Number(driverProfile.commissionDebtLimit || 0)
+  ) {
+    driverProfile.isBlockedForDebt = true;
+    driverProfile.blockedReason = driverProfile.blockedReason || 'تم إيقاف استقبال الرحلات بسبب مستحقات التطبيق';
+    driverProfile.isOnline = false;
+    driverProfile.isAvailable = false;
+    await driverProfile.save();
+
+    const error = new Error(driverProfile.blockedReason);
+    error.statusCode = 403;
+    throw error;
+  }
+
+  driverProfile.isOnline = true;
+  driverProfile.isAvailable = !driverProfile.activeServiceRequestId;
+  driverProfile.lastOnlineAt = new Date();
+
+  if (hasLocation) {
+    driverProfile.currentLat = lat;
+    driverProfile.currentLng = lng;
+    driverProfile.currentLocation = {
+      type: 'Point',
+      coordinates: [lng, lat],
+    };
+    driverProfile.currentLocationUpdatedAt = new Date();
+  }
+
+  await driverProfile.save();
+
+  return sendSuccess({
+    res,
+    message: 'السائق أصبح Online',
+    doc: {
+      success: true,
+      isOnline: true,
+      isAvailable: driverProfile.isAvailable,
+      driverProfile,
+    },
+  });
+});
+
+const setDriverOffline = asyncHandler(async (req, res) => {
+  if (!req.account.roles.includes('driver')) {
+    const error = new Error('هذا الإجراء متاح للسائق فقط');
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const driverProfile = await DriverProfile.findOne({ accountId: req.account._id });
+
+  if (!driverProfile) {
+    const error = new Error('ملف السائق غير موجود');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  driverProfile.isOnline = false;
+  driverProfile.isAvailable = false;
+  await driverProfile.save();
+
+  return sendSuccess({
+    res,
+    message: 'السائق أصبح Offline',
+    doc: {
+      success: true,
+      isOnline: false,
+      isAvailable: false,
+      driverProfile,
+    },
+  });
+});
+
+
 const getDriverReviewStatus = asyncHandler(async (req, res) => {
   const status = await buildDriverReviewStatus(req.account._id);
 
@@ -842,6 +985,8 @@ module.exports = {
   switchRole,
   getDriverReviewStatus,
   resubmitDriverReview,
+  setDriverOnline,
+  setDriverOffline,
   getMe,
   updateMe,
 };

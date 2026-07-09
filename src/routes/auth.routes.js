@@ -9,6 +9,8 @@ const {
   switchRole,
   getDriverReviewStatus,
   resubmitDriverReview,
+  setDriverOnline,
+  setDriverOffline,
   getMe,
   updateMe,
 } = require('../controllers/auth.controller');
@@ -273,6 +275,37 @@ router.put(
   updateDriverVehicle
 );
 
+
+
+router.post(
+  '/driver/online',
+  protect,
+  [
+    body('lat')
+      .optional({ nullable: true })
+      .isNumeric()
+      .withMessage('خط العرض غير صحيح'),
+    body('lng')
+      .optional({ nullable: true })
+      .isNumeric()
+      .withMessage('خط الطول غير صحيح'),
+    body('latitude')
+      .optional({ nullable: true })
+      .isNumeric()
+      .withMessage('خط العرض غير صحيح'),
+    body('longitude')
+      .optional({ nullable: true })
+      .isNumeric()
+      .withMessage('خط الطول غير صحيح'),
+    body('vehicleTypeCode')
+      .optional({ checkFalsy: true })
+      .trim(),
+  ],
+  validateRequest,
+  setDriverOnline
+);
+
+router.post('/driver/offline', protect, setDriverOffline);
 
 router.get('/driver-review/status', protect, getDriverReviewStatus);
 
