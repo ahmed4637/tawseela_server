@@ -351,12 +351,33 @@ async function reverseGeocode({ lat, lng }) {
   };
 }
 
-async function computeRoute({ origin, destination, vehicleTypeCode }) {
-  ensureGoogleKey();
+function buildRoutePayload({ distanceMeters, durationMinutes, staticDurationMinutes, encodedPolyline, viewport, vehicleTypeCode }) {
+  const distanceKm = Number((distanceMeters / 1000).toFixed(2));
 
-  const start = assertLatLng(origin, 'نقطة الانطلاق');
-  const end = assertLatLng(destination, 'نقطة الوصول');
+  const estimatedPrice = calculateFare({
+    distanceKm,
+    durationMinutes,
+    vehicleTypeCode,
+  });
 
+  return {
+    distanceMeters,
+    distanceKm,
+    durationMinutes,
+    staticDurationMinutes,
+    estimatedPrice,
+    encodedPolyline: encodedPolyline || '',
+    viewport: viewport || null,
+  };
+}
+
+function parseDirectionsDurationToMinutes(duration) {
+  const seconds = Number(duration?.value || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+  return Math.ceil(seconds / 60);
+}
+
+async function computeRouteWithRoutesApi({ start, end, vehicleTypeCode }) {
   const body = {
     origin: {
       location: {
@@ -401,31 +422,92 @@ async function computeRoute({ origin, destination, vehicleTypeCode }) {
   const route = Array.isArray(data.routes) ? data.routes[0] : null;
 
   if (!route) {
-    throw createHttpError('لم يتم العثور على مسار مناسب', 404);
+    throw createHttpError('لم يتم العثور على مسار مناسب', 404, data);
   }
 
-  const distanceMeters = route.distanceMeters || 0;
-  const distanceKm = Number((distanceMeters / 1000).toFixed(2));
-  const durationMinutes = parseGoogleDurationToMinutes(route.duration);
-  const staticDurationMinutes = parseGoogleDurationToMinutes(
-    route.staticDuration
-  );
+  const distanceMeters = Number(route.distanceMeters || 0);
 
-  const estimatedPrice = calculateFare({
-    distanceKm,
-    durationMinutes,
-    vehicleTypeCode,
-  });
-
-  return {
+  return buildRoutePayload({
     distanceMeters,
-    distanceKm,
-    durationMinutes,
-    staticDurationMinutes,
-    estimatedPrice,
+    durationMinutes: parseGoogleDurationToMinutes(route.duration),
+    staticDurationMinutes: parseGoogleDurationToMinutes(route.staticDuration),
     encodedPolyline: route.polyline?.encodedPolyline || '',
     viewport: route.viewport || null,
-  };
+    vehicleTypeCode,
+  });
+}
+
+async function computeRouteWithDirectionsApi({ start, end, vehicleTypeCode }) {
+  const url = new URL('https://maps.googleapis.com/maps/api/directions/json');
+
+  url.searchParams.set('origin', `${start.lat},${start.lng}`);
+  url.searchParams.set('destination', `${end.lat},${end.lng}`);
+  url.searchParams.set('mode', 'driving');
+  url.searchParams.set('language', 'ar');
+  url.searchParams.set('region', MAPS_COUNTRY_CODE.toLowerCase());
+  url.searchParams.set('alternatives', 'false');
+  url.searchParams.set('departure_time', 'now');
+  url.searchParams.set('key', GOOGLE_MAPS_SERVER_KEY);
+
+  const data = await fetchJson(url.toString());
+
+  if (data.status !== 'OK') {
+    const message = data.error_message || data.status || 'تعذر حساب المسار من Google';
+    throw createHttpError(message, 502, data);
+  }
+
+  const route = Array.isArray(data.routes) ? data.routes[0] : null;
+  const leg = route && Array.isArray(route.legs) ? route.legs[0] : null;
+
+  if (!route || !leg) {
+    throw createHttpError('لم يتم العثور على مسار مناسب', 404, data);
+  }
+
+  const distanceMeters = Number(leg.distance?.value || 0);
+  const durationMinutes = parseDirectionsDurationToMinutes(
+    leg.duration_in_traffic || leg.duration
+  );
+  const staticDurationMinutes = parseDirectionsDurationToMinutes(leg.duration);
+
+  return buildRoutePayload({
+    distanceMeters,
+    durationMinutes,
+    staticDurationMinutes,
+    encodedPolyline: route.overview_polyline?.points || '',
+    viewport: route.bounds || null,
+    vehicleTypeCode,
+  });
+}
+
+async function computeRoute({ origin, destination, vehicleTypeCode }) {
+  ensureGoogleKey();
+
+  const start = assertLatLng(origin, 'نقطة الانطلاق');
+  const end = assertLatLng(destination, 'نقطة الوصول');
+
+  try {
+    return await computeRouteWithRoutesApi({ start, end, vehicleTypeCode });
+  } catch (routesError) {
+    try {
+      return await computeRouteWithDirectionsApi({ start, end, vehicleTypeCode });
+    } catch (directionsError) {
+      console.warn('Google route calculation failed', {
+        routesStatus: routesError.statusCode,
+        routesMessage: routesError.message,
+        directionsStatus: directionsError.statusCode,
+        directionsMessage: directionsError.message,
+      });
+
+      throw createHttpError(
+        'تعذر حساب المسار حاليًا، تأكد من إعدادات خرائط Google وحاول مرة أخرى',
+        directionsError.statusCode || routesError.statusCode || 502,
+        {
+          routes: routesError.details || routesError.message,
+          directions: directionsError.details || directionsError.message,
+        }
+      );
+    }
+  }
 }
 
 module.exports = {
