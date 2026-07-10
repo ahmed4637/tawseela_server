@@ -6,9 +6,9 @@ const TripLocationSnapshot = require('../models/tripLocationSnapshot.model');
 const { getAppSettings } = require('./appSettings.service');
 
 const ACTIVE_TRACKING_STATUSES = [
-  'accepted',
+  'offer_accepted',
   'driver_arriving',
-  'driver_arrived',
+  'arrived_to_pickup',
   'in_progress',
 ];
 
@@ -90,7 +90,11 @@ const getTrackingPhaseFromStatus = (status) => {
     return 'in_trip';
   }
 
-  return 'driver_arriving';
+  if (['offer_accepted', 'driver_arriving', 'arrived_to_pickup'].includes(status)) {
+    return 'driver_arriving';
+  }
+
+  return 'inactive';
 };
 
 const toRadians = (degrees) => (degrees * Math.PI) / 180;
@@ -125,7 +129,14 @@ const getDistanceMeters = (first, second) => {
 const resolveDriverActiveRequest = async ({ driverProfile, accountId, requestId }) => {
   const profileRequestId = driverProfile.activeServiceRequestId?.toString() || '';
   const requestedId = requestId?.toString().trim() || '';
-  const serviceRequestId = profileRequestId || requestedId;
+
+  if (profileRequestId && requestedId && profileRequestId !== requestedId) {
+    const error = new Error('السائق يعمل على طلب آخر حاليًا');
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const serviceRequestId = requestedId || profileRequestId;
 
   if (!serviceRequestId) {
     return null;
@@ -291,6 +302,30 @@ const updateDriverLiveLocation = async ({
   };
 };
 
+const saveDriverLocationForRequest = async ({
+  accountId,
+  serviceRequestId,
+  lat,
+  lng,
+  latitude,
+  longitude,
+  speed,
+  heading,
+  accuracy,
+  metadata,
+}) => updateDriverLiveLocation({
+  accountId,
+  requestId: serviceRequestId,
+  lat,
+  lng,
+  latitude,
+  longitude,
+  speed,
+  heading,
+  accuracy,
+  metadata,
+});
+
 const ensureRequestTrackingAccess = async ({ serviceRequestId, accountId, roles = [] }) => {
   if (!isValidObjectId(serviceRequestId)) {
     const error = new Error('رقم الطلب غير صحيح');
@@ -385,6 +420,7 @@ module.exports = {
   getTrackingSettings,
   normalizeCoordinates,
   updateDriverLiveLocation,
+  saveDriverLocationForRequest,
   ensureRequestTrackingAccess,
   getLatestDriverLocationForRequest,
   getRequestLocationHistory,

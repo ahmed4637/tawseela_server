@@ -6,7 +6,7 @@ const {
   getTrackingSettings,
   getLatestDriverLocationForRequest,
   getRequestLocationHistory,
-  updateDriverLiveLocation,
+  saveDriverLocationForRequest,
 } = require('../services/tracking.service');
 
 const TRACKING_FIELDS = [
@@ -47,19 +47,35 @@ const getRequestLatestDriverLocation = asyncHandler(async (req, res) => {
   });
 });
 
+const getMyRequestLocationHistory = asyncHandler(async (req, res) => {
+  const data = await getRequestLocationHistory({
+    serviceRequestId: req.params.serviceRequestId,
+    accountId: req.accountId,
+    roles: req.roles || [],
+    limit: req.query.limit,
+  });
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب مسار التتبع بنجاح',
+    docs: data.docs,
+    extra: {
+      request: data.request,
+    },
+  });
+});
+
 
 const updateMyDriverLocationForRequest = asyncHandler(async (req, res) => {
-  const roles = req.roles || [];
-
-  if (!roles.includes('driver')) {
+  if (!req.roles?.includes('driver')) {
     const error = new Error('هذا الإجراء متاح للسائق فقط');
     error.statusCode = 403;
     throw error;
   }
 
-  const data = await updateDriverLiveLocation({
+  const data = await saveDriverLocationForRequest({
     accountId: req.accountId,
-    requestId: req.params.serviceRequestId,
+    serviceRequestId: req.params.serviceRequestId,
     lat: req.body.lat,
     lng: req.body.lng,
     latitude: req.body.latitude,
@@ -76,25 +92,11 @@ const updateMyDriverLocationForRequest = asyncHandler(async (req, res) => {
 
   return sendSuccess({
     res,
-    message: 'تم تحديث موقع السائق بنجاح',
+    message: 'تم حفظ موقع السائق بنجاح',
     doc: data.locationPayload,
-  });
-});
-
-const getMyRequestLocationHistory = asyncHandler(async (req, res) => {
-  const data = await getRequestLocationHistory({
-    serviceRequestId: req.params.serviceRequestId,
-    accountId: req.accountId,
-    roles: req.roles || [],
-    limit: req.query.limit,
-  });
-
-  return sendSuccess({
-    res,
-    message: 'تم جلب مسار التتبع بنجاح',
-    docs: data.docs,
     extra: {
-      request: data.request,
+      savedToHistory: data.locationPayload.savedToHistory,
+      savedToDriverProfile: data.locationPayload.savedToDriverProfile,
     },
   });
 });

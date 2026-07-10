@@ -26,6 +26,8 @@ const isValidObjectId = (id) => {
   return mongoose.Types.ObjectId.isValid(id);
 };
 
+const readRequestBody = (req) => (req.body && typeof req.body === 'object' ? req.body : {});
+
 const ensureValidId = (id, message) => {
   if (!isValidObjectId(id)) {
     const error = new Error(message);
@@ -314,7 +316,7 @@ const activateAccount = asyncHandler(async (req, res) => {
 
 const deactivateAccount = asyncHandler(async (req, res) => {
   const { accountId } = req.params;
-  const { reason } = req.body;
+  const { reason } = readRequestBody(req);
 
   ensureValidId(accountId, 'رقم الحساب غير صحيح');
 
@@ -452,7 +454,7 @@ const approveDriverProfile = asyncHandler(async (req, res) => {
   const doc = await approveDriverProfileReview({
     driverProfileId,
     req,
-    reason: req.body?.reason || '',
+    reason: readRequestBody(req).reason || '',
   });
 
   return sendSuccess({
@@ -464,7 +466,7 @@ const approveDriverProfile = asyncHandler(async (req, res) => {
 
 const rejectDriverProfile = asyncHandler(async (req, res) => {
   const { driverProfileId } = req.params;
-  const { rejectionReason, reason } = req.body;
+  const { rejectionReason, reason } = readRequestBody(req);
 
   ensureValidId(driverProfileId, 'رقم ملف السائق غير صحيح');
 
@@ -561,7 +563,7 @@ const approveDriverVehicle = asyncHandler(async (req, res) => {
   const doc = await approveDriverVehicleReview({
     driverVehicleId,
     req,
-    reason: req.body?.reason || '',
+    reason: readRequestBody(req).reason || '',
   });
 
   return sendSuccess({
@@ -573,7 +575,7 @@ const approveDriverVehicle = asyncHandler(async (req, res) => {
 
 const rejectDriverVehicle = asyncHandler(async (req, res) => {
   const { driverVehicleId } = req.params;
-  const { rejectionReason, reason } = req.body;
+  const { rejectionReason, reason } = readRequestBody(req);
 
   ensureValidId(driverVehicleId, 'رقم مركبة السائق غير صحيح');
 
@@ -896,7 +898,7 @@ const getServiceRequestDetailsForAdmin = asyncHandler(async (req, res) => {
 
 const cancelServiceRequestForAdmin = asyncHandler(async (req, res) => {
   const { requestId } = req.params;
-  const { reason } = req.body;
+  const { reason } = readRequestBody(req);
 
   ensureValidId(requestId, 'رقم الطلب غير صحيح');
 

@@ -639,7 +639,7 @@ const ensureRequestExists = async (requestId) => {
   return request;
 };
 
-const ensureDriverCanWork = async (accountId) => {
+const ensureDriverCanWork = async (accountId, options = {}) => {
   const driverProfile = await DriverProfile.findOne({ accountId });
 
   if (!driverProfile) {
@@ -687,11 +687,27 @@ const ensureDriverCanWork = async (accountId) => {
   }
 
   if (driverProfile.activeServiceRequestId) {
-    const error = new Error(
-      "لا يمكن للسائق العمل على أكثر من طلب في نفس الوقت",
-    );
-    error.statusCode = 403;
-    throw error;
+    const activeRequestId = driverProfile.activeServiceRequestId.toString();
+    const currentRequestId = options.currentRequestId
+      ? options.currentRequestId.toString()
+      : '';
+
+    const isSameRequest =
+      currentRequestId && activeRequestId === currentRequestId;
+
+    if (!isSameRequest) {
+      if (options.silentActiveRequest) {
+        driverProfile.$locals = driverProfile.$locals || {};
+        driverProfile.$locals.hasActiveRequestConflict = true;
+        return driverProfile;
+      }
+
+      const error = new Error(
+        "لا يمكن للسائق العمل على أكثر من طلب في نفس الوقت",
+      );
+      error.statusCode = 403;
+      throw error;
+    }
   }
 
   return driverProfile;
@@ -958,7 +974,17 @@ const getAvailableServiceRequestsForDriver = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  const driverProfile = await ensureDriverCanWork(req.accountId);
+  const driverProfile = await ensureDriverCanWork(req.accountId, {
+    silentActiveRequest: true,
+  });
+
+  if (driverProfile.$locals?.hasActiveRequestConflict) {
+    return sendSuccess({
+      res,
+      message: "السائق لديه طلب نشط حاليًا",
+      docs: [],
+    });
+  }
 
   if (
     driverProfile.currentLat === null ||
@@ -1327,7 +1353,9 @@ const acceptPendingOfferSafely = async ({
     throw error;
   }
 
-  const driverProfile = await ensureDriverCanWork(offer.driverAccountId.toString());
+  const driverProfile = await ensureDriverCanWork(offer.driverAccountId.toString(), {
+    currentRequestId: request._id,
+  });
 
   const acceptedDriverVehicle = await DriverVehicle.findOne({
     _id: offer.driverVehicleId,

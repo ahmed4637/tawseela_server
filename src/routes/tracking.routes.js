@@ -17,17 +17,6 @@ router.use(protect);
 
 router.get('/settings', getPublicTrackingSettings);
 
-router.get(
-  '/requests/:serviceRequestId/driver-location',
-  [
-    param('serviceRequestId')
-      .isMongoId()
-      .withMessage('رقم الطلب غير صحيح'),
-  ],
-  validateRequest,
-  getRequestLatestDriverLocation
-);
-
 
 router.post(
   '/requests/:serviceRequestId/driver-location',
@@ -58,6 +47,17 @@ router.post(
   ],
   validateRequest,
   updateMyDriverLocationForRequest
+);
+
+router.get(
+  '/requests/:serviceRequestId/driver-location',
+  [
+    param('serviceRequestId')
+      .isMongoId()
+      .withMessage('رقم الطلب غير صحيح'),
+  ],
+  validateRequest,
+  getRequestLatestDriverLocation
 );
 
 router.get(
