@@ -865,7 +865,9 @@ const initSocketServer = (httpServer) => {
           speed: payload.speed,
           heading: payload.heading,
           accuracy: payload.accuracy,
+          timestamp: payload.timestamp ?? payload.updatedAt,
           metadata: {
+            source: 'socket',
             socketId: socket.id,
             platform: payload.platform || null,
             appVersion: payload.appVersion || null,

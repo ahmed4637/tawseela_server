@@ -2,12 +2,16 @@ const AppSettings = require('../models/appSettings.model');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 const { createAdminAuditLog } = require('../services/adminAuditLog.service');
+const { emitToAdmins, emitToRequest } = require('../sockets/socket.server');
 const {
   getTrackingSettings,
   getLatestDriverLocationForRequest,
   getRequestLocationHistory,
   saveDriverLocationForRequest,
 } = require('../services/tracking.service');
+
+const readRequestBody = (req) =>
+  req.body && typeof req.body === 'object' ? req.body : {};
 
 const TRACKING_FIELDS = [
   'liveUpdateSeconds',
@@ -73,22 +77,39 @@ const updateMyDriverLocationForRequest = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  const body = readRequestBody(req);
   const data = await saveDriverLocationForRequest({
     accountId: req.accountId,
     serviceRequestId: req.params.serviceRequestId,
-    lat: req.body.lat,
-    lng: req.body.lng,
-    latitude: req.body.latitude,
-    longitude: req.body.longitude,
-    speed: req.body.speed,
-    heading: req.body.heading,
-    accuracy: req.body.accuracy,
+    lat: body.lat,
+    lng: body.lng,
+    latitude: body.latitude,
+    longitude: body.longitude,
+    speed: body.speed,
+    heading: body.heading,
+    accuracy: body.accuracy,
+    timestamp: body.timestamp ?? body.updatedAt,
     metadata: {
       source: 'rest_fallback',
-      platform: req.body.platform || null,
-      appVersion: req.body.appVersion || null,
+      platform: body.platform || null,
+      appVersion: body.appVersion || null,
     },
   });
+
+  if (data.locationPayload.serviceRequestId) {
+    emitToRequest(
+      data.locationPayload.serviceRequestId,
+      'driver:location-updated',
+      data.locationPayload
+    );
+  }
+
+  if (data.settings.adminLiveTrackingEnabled) {
+    emitToAdmins('driver:location-updated', {
+      ...data.locationPayload,
+      activeServiceRequestId: data.locationPayload.serviceRequestId,
+    });
+  }
 
   return sendSuccess({
     res,

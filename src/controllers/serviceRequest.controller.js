@@ -1398,13 +1398,20 @@ const acceptPendingOfferSafely = async ({
     const lockedDriverProfile = await DriverProfile.findOneAndUpdate(
       {
         _id: driverProfile._id,
-        activeServiceRequestId: null,
         isActive: true,
         isOnline: true,
-        isAvailable: true,
         isApproved: true,
         reviewStatus: "approved",
         isBlockedForDebt: false,
+        $or: [
+          {
+            activeServiceRequestId: null,
+            isAvailable: true,
+          },
+          {
+            activeServiceRequestId: request._id,
+          },
+        ],
         $expr: {
           $lt: ["$commissionDebt", "$commissionDebtLimit"],
         },

@@ -24,13 +24,31 @@ const DEFAULT_TRACKING_SETTINGS = {
 
 const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value?.toString() || '');
 
-const toNumberOrNull = (value) => {
+const toNumberOrNull = (value, { min = -Infinity, max = Infinity } = {}) => {
   if (value === undefined || value === null || value === '') {
     return null;
   }
 
   const number = Number(value);
-  return Number.isFinite(number) ? number : null;
+
+  if (!Number.isFinite(number) || number < min || number > max) {
+    return null;
+  }
+
+  return number;
+};
+
+const normalizeClientTimestamp = (value) => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const numericValue = Number(value);
+  const parsed = Number.isFinite(numericValue)
+    ? new Date(numericValue < 1e12 ? numericValue * 1000 : numericValue)
+    : new Date(value);
+
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
 const normalizeCoordinates = ({ lat, lng, latitude, longitude }) => {
@@ -161,6 +179,12 @@ const resolveDriverActiveRequest = async ({ driverProfile, accountId, requestId 
     throw error;
   }
 
+  if (!ACTIVE_TRACKING_STATUSES.includes(request.status)) {
+    const error = new Error('لا يمكن تحديث موقع طلب غير نشط');
+    error.statusCode = 409;
+    throw error;
+  }
+
   return request;
 };
 
@@ -215,10 +239,19 @@ const updateDriverLiveLocation = async ({
   speed,
   heading,
   accuracy,
+  timestamp,
   metadata,
 }) => {
   const coordinates = normalizeCoordinates({ lat, lng, latitude, longitude });
   const now = new Date();
+  const clientTimestamp = normalizeClientTimestamp(timestamp);
+  const normalizedSpeed = toNumberOrNull(speed, { min: 0 });
+  const normalizedHeading = toNumberOrNull(heading, { min: 0, max: 360 });
+  const normalizedAccuracy = toNumberOrNull(accuracy, { min: 0 });
+  const locationMetadata = {
+    ...(metadata && typeof metadata === 'object' ? metadata : {}),
+    ...(clientTimestamp ? { clientTimestamp: clientTimestamp.toISOString() } : {}),
+  };
 
   const [settings, driverProfile] = await Promise.all([
     getTrackingSettings(),
@@ -263,12 +296,12 @@ const updateDriverLiveLocation = async ({
       },
       lat: coordinates.lat,
       lng: coordinates.lng,
-      speed: toNumberOrNull(speed),
-      heading: toNumberOrNull(heading),
-      accuracy: toNumberOrNull(accuracy),
+      speed: normalizedSpeed,
+      heading: normalizedHeading,
+      accuracy: normalizedAccuracy,
       phase: getTrackingPhaseFromStatus(request.status),
       requestStatus: request.status,
-      metadata: metadata || null,
+      metadata: Object.keys(locationMetadata).length ? locationMetadata : null,
     });
   }
 
@@ -286,9 +319,9 @@ const updateDriverLiveLocation = async ({
       lng: coordinates.lng,
       latitude: coordinates.lat,
       longitude: coordinates.lng,
-      speed: toNumberOrNull(speed),
-      heading: toNumberOrNull(heading),
-      accuracy: toNumberOrNull(accuracy),
+      speed: normalizedSpeed,
+      heading: normalizedHeading,
+      accuracy: normalizedAccuracy,
       requestId: activeRequestId,
       serviceRequestId: activeRequestId,
       rideId: activeRequestId,
@@ -297,6 +330,9 @@ const updateDriverLiveLocation = async ({
       savedToDriverProfile: savedDriverProfile,
       savedToHistory: !!savedSnapshot,
       snapshotId: savedSnapshot?._id || null,
+      source: locationMetadata.source || 'driver_app',
+      timestamp: clientTimestamp || now,
+      clientTimestamp,
       updatedAt: now,
     },
   };
@@ -312,6 +348,7 @@ const saveDriverLocationForRequest = async ({
   speed,
   heading,
   accuracy,
+  timestamp,
   metadata,
 }) => updateDriverLiveLocation({
   accountId,
@@ -323,6 +360,7 @@ const saveDriverLocationForRequest = async ({
   speed,
   heading,
   accuracy,
+  timestamp,
   metadata,
 });
 
@@ -369,29 +407,59 @@ const getLatestDriverLocationForRequest = async ({ serviceRequestId, accountId, 
       .lean(),
     request.acceptedDriverAccountId
       ? DriverProfile.findOne({ accountId: request.acceptedDriverAccountId })
-          .select('accountId currentLat currentLng currentLocation currentLocationUpdatedAt isOnline isAvailable')
+          .select(
+            'accountId activeServiceRequestId currentLat currentLng currentLocation currentLocationUpdatedAt isOnline isAvailable'
+          )
           .lean()
       : null,
   ]);
+
+  const isRequestActivelyTracked = ACTIVE_TRACKING_STATUSES.includes(request.status);
+  const isProfileAttachedToRequest =
+    driverProfile?.activeServiceRequestId?.toString() === serviceRequestId.toString();
+  const hasProfileCoordinates =
+    driverProfile?.currentLat !== null &&
+    driverProfile?.currentLat !== undefined &&
+    driverProfile?.currentLng !== null &&
+    driverProfile?.currentLng !== undefined;
+  const canUseDriverProfile =
+    isRequestActivelyTracked && isProfileAttachedToRequest && hasProfileCoordinates;
+
+  const profileLocation = canUseDriverProfile
+    ? {
+        serviceRequestId,
+        requestId: serviceRequestId,
+        rideId: serviceRequestId,
+        driverAccountId: driverProfile.accountId,
+        lat: driverProfile.currentLat,
+        lng: driverProfile.currentLng,
+        latitude: driverProfile.currentLat,
+        longitude: driverProfile.currentLng,
+        requestStatus: request.status,
+        phase: getTrackingPhaseFromStatus(request.status),
+        createdAt: driverProfile.currentLocationUpdatedAt || null,
+        updatedAt: driverProfile.currentLocationUpdatedAt || null,
+        timestamp: driverProfile.currentLocationUpdatedAt || null,
+        source: 'driver_profile',
+      }
+    : null;
+
+  const snapshotTimestamp = snapshot?.createdAt
+    ? new Date(snapshot.createdAt).getTime()
+    : 0;
+  const profileTimestamp = profileLocation?.updatedAt
+    ? new Date(profileLocation.updatedAt).getTime()
+    : 0;
+  const latestLocation =
+    profileLocation && profileTimestamp > snapshotTimestamp
+      ? profileLocation
+      : snapshot || profileLocation;
 
   return {
     request,
     snapshot,
     driverProfile,
-    latestLocation: snapshot || (
-      driverProfile?.currentLat !== null && driverProfile?.currentLng !== null
-        ? {
-            serviceRequestId,
-            driverAccountId: driverProfile.accountId,
-            lat: driverProfile.currentLat,
-            lng: driverProfile.currentLng,
-            latitude: driverProfile.currentLat,
-            longitude: driverProfile.currentLng,
-            createdAt: driverProfile.currentLocationUpdatedAt || null,
-            source: 'driver_profile',
-          }
-        : null
-    ),
+    latestLocation,
   };
 };
 

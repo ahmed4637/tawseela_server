@@ -13,6 +13,19 @@ const { protect } = require('../middlewares/authMiddleware');
 
 const router = express.Router();
 
+const isValidLocationTimestamp = (value) => {
+  if (value === undefined || value === null || value === '') {
+    return true;
+  }
+
+  const numericValue = Number(value);
+  const parsed = Number.isFinite(numericValue)
+    ? new Date(numericValue < 1e12 ? numericValue * 1000 : numericValue)
+    : new Date(value);
+
+  return !Number.isNaN(parsed.getTime());
+};
+
 router.use(protect);
 
 router.get('/settings', getPublicTrackingSettings);
@@ -44,6 +57,47 @@ router.post(
       .optional()
       .isFloat({ min: -180, max: 180 })
       .withMessage('خط طول الموقع غير صحيح'),
+
+    body('speed')
+      .optional()
+      .isFloat({ min: 0 })
+      .withMessage('سرعة السائق غير صحيحة'),
+
+    body('heading')
+      .optional()
+      .isFloat({ min: 0, max: 360 })
+      .withMessage('اتجاه حركة السائق غير صحيح'),
+
+    body('accuracy')
+      .optional()
+      .isFloat({ min: 0 })
+      .withMessage('دقة الموقع غير صحيحة'),
+
+    body('timestamp')
+      .optional()
+      .custom(isValidLocationTimestamp)
+      .withMessage('توقيت الموقع غير صحيح'),
+
+    body('updatedAt')
+      .optional()
+      .custom(isValidLocationTimestamp)
+      .withMessage('توقيت الموقع غير صحيح'),
+
+    body().custom((value) => {
+      const payload = value && typeof value === 'object' ? value : {};
+      const latitude = payload.lat ?? payload.latitude;
+      const longitude = payload.lng ?? payload.longitude;
+
+      if (latitude === undefined || latitude === null || latitude === '') {
+        throw new Error('خط عرض الموقع مطلوب');
+      }
+
+      if (longitude === undefined || longitude === null || longitude === '') {
+        throw new Error('خط طول الموقع مطلوب');
+      }
+
+      return true;
+    }),
   ],
   validateRequest,
   updateMyDriverLocationForRequest
