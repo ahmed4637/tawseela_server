@@ -118,10 +118,15 @@ const getPublicServiceVehicleConfigs = asyncHandler(async (req, res) => {
     .populate('vehicleTypeId')
     .sort({ serviceType: 1, vehicleTypeName: 1 });
 
+  const availableDocs = docs.filter((doc) => {
+    const vehicle = doc.vehicleTypeId;
+    return vehicle && vehicle.isActive !== false;
+  });
+
   return sendSuccess({
     res,
     message: 'تم جلب إعدادات الخدمة والمركبة بنجاح',
-    docs,
+    docs: availableDocs,
   });
 });
 

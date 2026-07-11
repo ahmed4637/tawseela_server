@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const Vehicle = require('../models/vehicle.model');
+const ServiceVehicleConfig = require('../models/serviceVehicleConfig.model');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 
@@ -18,7 +19,32 @@ const getAllVehicles = asyncHandler(async (req, res) => {
   }
 
   if (serviceType) {
-    query.allowedServices = serviceType;
+    const normalizedServiceType = serviceType.toString().trim().toLowerCase();
+    const configuredSupport = await ServiceVehicleConfig.find({
+      serviceType: normalizedServiceType,
+    })
+      .select('vehicleTypeCode isActive')
+      .lean();
+
+    const configuredCodes = configuredSupport
+      .map((item) => item.vehicleTypeCode?.toString().trim().toLowerCase())
+      .filter(Boolean);
+    const activeConfiguredCodes = configuredSupport
+      .filter((item) => item.isActive === true)
+      .map((item) => item.vehicleTypeCode?.toString().trim().toLowerCase())
+      .filter(Boolean);
+
+    query.$or = [
+      ...(activeConfiguredCodes.length > 0
+        ? [{ code: { $in: activeConfiguredCodes } }]
+        : []),
+      {
+        allowedServices: normalizedServiceType,
+        ...(configuredCodes.length > 0
+          ? { code: { $nin: configuredCodes } }
+          : {}),
+      },
+    ];
   }
 
   const docs = await Vehicle.find(query).sort({
