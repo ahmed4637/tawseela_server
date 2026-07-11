@@ -2,7 +2,12 @@ const AppSettings = require('../models/appSettings.model');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 const { createAdminAuditLog } = require('../services/adminAuditLog.service');
-const { emitToAdmins, emitToRequest } = require('../sockets/socket.server');
+const {
+  emitToAdmins,
+  emitToRooms,
+  getAccountRoom,
+  getRequestRoom,
+} = require('../sockets/socket.server');
 const {
   getTrackingSettings,
   getLatestDriverLocationForRequest,
@@ -97,8 +102,13 @@ const updateMyDriverLocationForRequest = asyncHandler(async (req, res) => {
   });
 
   if (data.locationPayload.serviceRequestId) {
-    emitToRequest(
-      data.locationPayload.serviceRequestId,
+    const customerAccountId = data.request?.customerAccountId?.toString() || '';
+
+    emitToRooms(
+      [
+        getRequestRoom(data.locationPayload.serviceRequestId),
+        customerAccountId ? getAccountRoom(customerAccountId) : null,
+      ],
       'driver:location-updated',
       data.locationPayload
     );

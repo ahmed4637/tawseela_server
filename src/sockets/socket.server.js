@@ -190,6 +190,13 @@ const getEventNamesToEmit = (eventName, payload) => {
     return [];
   }
 
+  // Location updates are high-frequency. Emitting legacy aliases for every
+  // point multiplies network traffic and can make the customer map lag behind.
+  // Current mobile clients use the canonical event only.
+  if (original === "driver:location-updated") {
+    return [original];
+  }
+
   const normalized = normalizeSocketEventName(original);
   const aliases = [
     original,
@@ -1034,8 +1041,14 @@ const initSocketServer = (httpServer) => {
         // The live point is broadcast immediately. Database work is intentionally
         // queued in the background so MongoDB latency never blocks the trip stream.
         if (locationPayload.serviceRequestId) {
-          emitToRequest(
-            locationPayload.serviceRequestId,
+          const customerAccountId =
+            context.request?.customerAccountId?.toString() || "";
+
+          emitToRooms(
+            [
+              getRequestRoom(locationPayload.serviceRequestId),
+              customerAccountId ? getAccountRoom(customerAccountId) : null,
+            ],
             "driver:location-updated",
             locationPayload,
           );
