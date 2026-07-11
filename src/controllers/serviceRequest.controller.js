@@ -5,7 +5,6 @@ const ServiceRequest = require("../models/serviceRequest.model");
 const ServiceOffer = require("../models/serviceOffer.model");
 const Rating = require("../models/rating.model");
 const Vehicle = require("../models/vehicle.model");
-const ServiceVehicleConfig = require("../models/serviceVehicleConfig.model");
 const DriverProfile = require("../models/driverProfile.model");
 const DriverVehicle = require("../models/driverVehicle.model");
 const {
@@ -540,29 +539,14 @@ const getCommissionPercent = (vehicle, serviceType) => {
   return 0;
 };
 
-const calculateEstimatedPrice = ({
-  vehicle,
-  distanceKm,
-  serviceVehicleConfig = null,
-}) => {
+const calculateEstimatedPrice = ({ vehicle, distanceKm }) => {
   const distance = Number(distanceKm) || 0;
-  const configBaseFare = Number(serviceVehicleConfig?.baseFare || 0);
-  const configPricePerKm = Number(serviceVehicleConfig?.pricePerKm || 0);
-  const configMinFare = Number(serviceVehicleConfig?.minFare || 0);
 
-  const baseFare = configBaseFare > 0
-    ? configBaseFare
-    : Number(vehicle.startPrice || 0);
-  const pricePerKm = configPricePerKm > 0
-    ? configPricePerKm
-    : Number(vehicle.pricePerKm || 0);
-  const minimumFare = configMinFare > 0
-    ? configMinFare
-    : Number(vehicle.minPrice || 0);
+  const rawPrice =
+    Number(vehicle.startPrice || 0) +
+    distance * Number(vehicle.pricePerKm || 0);
 
-  const rawPrice = baseFare + distance * pricePerKm;
-
-  return roundMoney(Math.max(rawPrice, minimumFare));
+  return roundMoney(Math.max(rawPrice, Number(vehicle.minPrice || 0)));
 };
 
 const calculateFinalFareOnCompletion = ({ request, vehicle, body = {} }) => {
@@ -735,7 +719,9 @@ const ensureDriverCanWork = async (accountId, options = {}) => {
 const createServiceRequest = asyncHandler(async (req, res) => {
   const {
     serviceType,
+    vehicleTypeId,
     vehicleTypeCode,
+    vehicleTypeName,
     pickup,
     destination,
     distanceKm,
@@ -763,20 +749,7 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  const serviceVehicleConfig = await ServiceVehicleConfig.findOne({
-    serviceType,
-    $or: [
-      { vehicleTypeId: vehicle._id },
-      { vehicleTypeCode: vehicle.code },
-    ],
-  }).lean();
-
-  const isSupportedByServiceCatalog = serviceVehicleConfig
-    ? serviceVehicleConfig.isActive === true
-    : Array.isArray(vehicle.allowedServices) &&
-      vehicle.allowedServices.includes(serviceType);
-
-  if (!isSupportedByServiceCatalog) {
+  if (!vehicle.allowedServices.includes(serviceType)) {
     const error = new Error("نوع المركبة لا يدعم هذا النوع من الطلبات");
     error.statusCode = 400;
     throw error;
@@ -819,7 +792,6 @@ const createServiceRequest = asyncHandler(async (req, res) => {
   const estimatedPrice = calculateEstimatedPrice({
     vehicle,
     distanceKm,
-    serviceVehicleConfig,
   });
 
   const initialCustomerPrice =
@@ -864,9 +836,9 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     serviceType,
     customerAccountId: req.accountId,
 
-    vehicleTypeId: vehicle._id,
+    vehicleTypeId: vehicleTypeId || vehicle._id,
     vehicleTypeCode: vehicle.code,
-    vehicleTypeName: vehicle.name,
+    vehicleTypeName: vehicleTypeName || vehicle.name,
 
     pickup,
     pickupLocation: buildGeoPoint({
