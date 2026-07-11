@@ -48,6 +48,9 @@ const {
   emitToAccount,
   emitToRequest,
   emitToVehicle,
+  emitToRooms,
+  getAccountRoom,
+  getRequestRoom,
 } = require("../sockets/socket.server");
 
 const isDevelopment = process.env.NODE_ENV === "development";
@@ -1493,6 +1496,42 @@ const acceptPendingOfferSafely = async ({
     );
 
     const acceptedRequest = await ServiceRequest.findById(request._id);
+
+    const acceptedRequestId = acceptedRequest._id.toString();
+    const acceptanceLivePayload = {
+      request: {
+        ...acceptedRequest.toObject({ depopulate: true }),
+        _id: acceptedRequest._id,
+        id: acceptedRequestId,
+        requestId: acceptedRequestId,
+      },
+      offer: {
+        ...offer.toObject({ depopulate: true }),
+        _id: offer._id,
+        id: offer._id.toString(),
+      },
+      requestId: acceptedRequestId,
+      serviceRequestId: acceptedRequestId,
+      status: acceptedRequest.status,
+      acceptedBy,
+      emittedAt: new Date(),
+    };
+
+    // Notify both phones immediately after the acceptance is committed. Chat
+    // room creation, populate/rating queries and push notifications continue
+    // afterwards without delaying the live transition to the trip screens.
+    safeSocketEmit(() => {
+      emitToRooms(
+        [
+          getRequestRoom(acceptedRequestId),
+          getAccountRoom(request.customerAccountId.toString()),
+          getAccountRoom(offer.driverAccountId.toString()),
+        ],
+        "request:confirmed-live",
+        acceptanceLivePayload,
+      );
+      emitToAdmins("admin:request-confirmed-live", acceptanceLivePayload);
+    });
 
     if (offer.driverPromoCodeId) {
       await reserveDriverPromoForAcceptedOffer({
@@ -3010,57 +3049,112 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
 
   await request.save();
 
-  const requestForParties = await loadEnrichedRequestById({
-    requestId: request._id,
-    includeContactInfo: !!request.acceptedDriverAccountId,
-  });
+  const requestIdString = request._id.toString();
+  const penaltySocketPayload = penaltyResult?.applied
+    ? {
+        penaltyId: penaltyResult.penalty?._id,
+        blockUntil: penaltyResult.penalty?.blockUntil,
+        blockMinutes: penaltyResult.penalty?.blockMinutes,
+        phase: penaltyResult.phase,
+      }
+    : null;
 
-  safeSocketEmit(() => {
-    const payload = {
-      request: requestForParties,
-      status: request.status,
-      penalty: penaltyResult?.applied
-        ? {
-            penaltyId: penaltyResult.penalty?._id,
-            blockUntil: penaltyResult.penalty?.blockUntil,
-            blockMinutes: penaltyResult.penalty?.blockMinutes,
-            phase: penaltyResult.phase,
-          }
-        : null,
-    };
+  const runtimeRequest = {
+    ...request.toObject({ depopulate: true }),
+    _id: request._id,
+    id: requestIdString,
+    requestId: requestIdString,
+  };
 
-    emitToRequest(request._id.toString(), "request:status-changed", payload);
-
-    emitToAccount(
-      request.customerAccountId.toString(),
-      "request:status-changed",
+  const emitStatusToParties = (eventName, payload) => {
+    emitToRooms(
+      [
+        getRequestRoom(requestIdString),
+        getAccountRoom(request.customerAccountId.toString()),
+        request.acceptedDriverAccountId
+          ? getAccountRoom(request.acceptedDriverAccountId.toString())
+          : null,
+      ],
+      eventName,
       payload,
     );
 
-    if (request.acceptedDriverAccountId) {
-      emitToAccount(
-        request.acceptedDriverAccountId.toString(),
-        "request:status-changed",
-        payload,
-      );
-    }
-
     if (
+      eventName === "request:status-changed" &&
       request.vehicleTypeCode &&
       ["pending_offers", "negotiating", "cancelled_by_customer", "expired"].includes(
         request.status,
       )
     ) {
-      emitToVehicle(request.vehicleTypeCode, "request:status-changed", payload);
+      emitToVehicle(request.vehicleTypeCode, eventName, payload);
     }
+  };
 
-    emitToAdmins("admin:request-status-changed", payload);
+  // This compact event is the runtime tunnel. It is emitted as soon as the
+  // authoritative database save succeeds and never waits for populate/rating
+  // queries. Flutter merges only its status fields into the current request.
+  const runtimePayload = {
+    request: runtimeRequest,
+    requestId: requestIdString,
+    serviceRequestId: requestIdString,
+    status: request.status,
+    lastStatusChangedAt: request.lastStatusChangedAt,
+    penalty: penaltySocketPayload,
+    emittedAt: new Date(),
+  };
+
+  safeSocketEmit(() => {
+    emitStatusToParties("request:status-live", runtimePayload);
+    emitToAdmins("admin:request-status-live", runtimePayload);
   });
+
+  const emitEnrichedStatus = (requestForParties) => {
+    const payload = {
+      request: requestForParties,
+      status: request.status,
+      penalty: penaltySocketPayload,
+    };
+
+    emitStatusToParties("request:status-changed", payload);
+    emitToAdmins("admin:request-status-changed", payload);
+  };
+
+  const usesFastRuntimeResponse = [
+    "driver_arriving",
+    "arrived_to_pickup",
+    "in_progress",
+  ].includes(request.status);
+
+  let requestForResponse = runtimeRequest;
+
+  if (usesFastRuntimeResponse) {
+    // Keep the HTTP action fast as well. The enriched compatibility event is
+    // still emitted in the background for screens/admin code that need it.
+    setImmediate(async () => {
+      try {
+        const requestForParties = await loadEnrichedRequestById({
+          requestId: request._id,
+          includeContactInfo: !!request.acceptedDriverAccountId,
+        });
+
+        safeSocketEmit(() => emitEnrichedStatus(requestForParties));
+      } catch (error) {
+        console.error("Async request status enrichment error:", error.message);
+      }
+    });
+  } else {
+    requestForResponse = await loadEnrichedRequestById({
+      requestId: request._id,
+      includeContactInfo: !!request.acceptedDriverAccountId,
+    });
+
+    safeSocketEmit(() => emitEnrichedStatus(requestForResponse));
+  }
 
   const responsePayload = {
     res,
     message: "تم تحديث حالة الطلب بنجاح",
-    doc: requestForParties,
+    doc: requestForResponse,
     extra: {
       penalty: penaltyResult?.applied
         ? {

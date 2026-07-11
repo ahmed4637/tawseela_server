@@ -209,6 +209,7 @@ const createChatMessage = async ({
   text = '',
   mediaUrl = '',
   location = null,
+  realtime = false,
 }) => {
   const room = await ensureChatRoomAccess({
     roomId,
@@ -295,6 +296,37 @@ const createChatMessage = async ({
         ? 'صورة'
         : 'موقع';
   room.lastMessageAt = message.createdAt;
+
+  if (realtime) {
+    // The persisted message is already authoritative. Broadcast it immediately
+    // and update the room preview in the background instead of making the
+    // receiver wait for another save + populate query.
+    setImmediate(() => {
+      ChatRoom.updateOne(
+        {
+          _id: room._id,
+          $or: [
+            { lastMessageAt: null },
+            { lastMessageAt: { $lte: message.createdAt } },
+          ],
+        },
+        {
+          $set: {
+            lastMessageText: room.lastMessageText,
+            lastMessageAt: message.createdAt,
+          },
+        },
+      ).catch((error) => {
+        console.error('Realtime chat room preview update error:', error.message);
+      });
+    });
+
+    return {
+      room,
+      message: message.toObject({ depopulate: true }),
+    };
+  }
+
   await room.save();
 
   const populatedMessage = await populateMessage(

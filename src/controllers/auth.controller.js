@@ -832,7 +832,19 @@ const setDriverOnline = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  const driverProfile = await DriverProfile.findOne({ accountId: req.account._id });
+  const [driverProfile, , approvedVehicleCount] = await Promise.all([
+    DriverProfile.findOne({ accountId: req.account._id }),
+    assertNoActiveRestriction({
+      accountId: req.account._id,
+      restrictionTypes: ['app_usage', 'driver_online', 'receiving_requests'],
+    }),
+    DriverVehicle.countDocuments({
+      accountId: req.account._id,
+      isActive: true,
+      isApproved: true,
+      reviewStatus: 'approved',
+    }),
+  ]);
 
   if (!driverProfile) {
     const error = new Error('ملف السائق غير موجود');
@@ -840,23 +852,11 @@ const setDriverOnline = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  await assertNoActiveRestriction({
-    accountId: req.account._id,
-    restrictionTypes: ['app_usage', 'driver_online', 'receiving_requests'],
-  });
-
   if (!driverProfile.isApproved || driverProfile.reviewStatus !== 'approved') {
     const error = new Error('حساب السائق لم تتم الموافقة عليه بعد');
     error.statusCode = 403;
     throw error;
   }
-
-  const approvedVehicleCount = await DriverVehicle.countDocuments({
-    accountId: req.account._id,
-    isActive: true,
-    isApproved: true,
-    reviewStatus: 'approved',
-  });
 
   if (approvedVehicleCount === 0) {
     const error = new Error('لا يمكن فتح Online قبل اعتماد مركبة واحدة على الأقل');

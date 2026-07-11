@@ -242,6 +242,15 @@ function getAddressComponent(result, types) {
   return match?.long_name || match?.short_name || '';
 }
 
+function getAddressComponentFromResults(results, types) {
+  for (const result of results) {
+    const value = getAddressComponent(result, types);
+    if (value) return value;
+  }
+
+  return '';
+}
+
 function hasAnyType(result, types) {
   const resultTypes = Array.isArray(result?.types) ? result.types : [];
   return types.some((type) => resultTypes.includes(type));
@@ -253,8 +262,19 @@ function scoreReverseGeocodeResult(result) {
   if (hasAnyType(result, ['street_address', 'premise', 'subpremise'])) score += 120;
   if (hasAnyType(result, ['point_of_interest', 'establishment'])) score += 95;
   if (hasAnyType(result, ['route', 'intersection'])) score += 80;
-  if (hasAnyType(result, ['neighborhood', 'sublocality', 'sublocality_level_1'])) score += 55;
-  if (hasAnyType(result, ['locality'])) score += 15;
+  if (
+    hasAnyType(result, [
+      'neighborhood',
+      'sublocality',
+      'sublocality_level_1',
+      'sublocality_level_2',
+      'sublocality_level_3',
+      'administrative_area_level_3',
+    ])
+  ) {
+    score += 65;
+  }
+  if (hasAnyType(result, ['locality', 'postal_town'])) score += 15;
   if (hasAnyType(result, ['administrative_area_level_1', 'administrative_area_level_2', 'country'])) score -= 35;
 
   const formatted = String(result?.formatted_address || '');
@@ -265,7 +285,7 @@ function scoreReverseGeocodeResult(result) {
   return score;
 }
 
-function buildDetailedAddress(result, point) {
+function buildDetailedAddress(result, point, rankedResults = []) {
   if (!result) {
     return {
       name: '',
@@ -273,26 +293,58 @@ function buildDetailedAddress(result, point) {
     };
   }
 
-  const streetNumber = getAddressComponent(result, ['street_number']);
-  const route = getAddressComponent(result, ['route']);
-  const premise = getAddressComponent(result, ['premise', 'subpremise']);
-  const poi = getAddressComponent(result, ['point_of_interest', 'establishment']);
-  const neighborhood = getAddressComponent(result, ['neighborhood']);
-  const sublocality = getAddressComponent(result, [
+  const sources = [
+    result,
+    ...rankedResults.filter((item) => item && item !== result),
+  ];
+  const streetNumber = getAddressComponentFromResults(sources, ['street_number']);
+  const route = getAddressComponentFromResults(sources, ['route']);
+  const premise = getAddressComponentFromResults(sources, ['premise', 'subpremise']);
+  const poi = getAddressComponentFromResults(sources, [
+    'point_of_interest',
+    'establishment',
+  ]);
+  const neighborhood = getAddressComponentFromResults(sources, [
+    'neighborhood',
+  ]);
+  const sublocalityLevel3 = getAddressComponentFromResults(sources, [
+    'sublocality_level_3',
+  ]);
+  const sublocalityLevel2 = getAddressComponentFromResults(sources, [
+    'sublocality_level_2',
+  ]);
+  const sublocalityLevel1 = getAddressComponentFromResults(sources, [
     'sublocality_level_1',
     'sublocality',
-    'political',
   ]);
-  const locality = getAddressComponent(result, ['locality']);
-  const area2 = getAddressComponent(result, ['administrative_area_level_2']);
+  const adminArea3 = getAddressComponentFromResults(sources, [
+    'administrative_area_level_3',
+  ]);
+  const locality = getAddressComponentFromResults(sources, [
+    'locality',
+    'postal_town',
+  ]);
+  const area2 = getAddressComponentFromResults(sources, [
+    'administrative_area_level_2',
+  ]);
 
   const street = [streetNumber, route].filter(Boolean).join(' ');
-  const name = poi || premise || street || neighborhood || sublocality || locality || '';
+  const detailedArea =
+    neighborhood ||
+    sublocalityLevel3 ||
+    sublocalityLevel2 ||
+    sublocalityLevel1 ||
+    adminArea3;
+  const name = poi || premise || street || detailedArea || locality || '';
 
   const parts = [
-    poi || premise || street,
+    poi || premise,
+    street,
     neighborhood,
-    sublocality,
+    sublocalityLevel3,
+    sublocalityLevel2,
+    sublocalityLevel1,
+    adminArea3,
     locality,
     area2,
   ]
@@ -302,9 +354,17 @@ function buildDetailedAddress(result, point) {
 
   let address = parts.join('، ');
 
+  if (!address || parts.length < 2) {
+    const formattedAddress = String(result.formatted_address || '').trim();
+    if (formattedAddress && formattedAddress !== address) {
+      address = [address, formattedAddress]
+        .filter(Boolean)
+        .join('، ');
+    }
+  }
+
   if (!address) {
-    address = result.formatted_address ||
-      `موقع محدد على الخريطة ${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`;
+    address = `موقع محدد على الخريطة ${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`;
   }
 
   return { name, address };
@@ -329,6 +389,10 @@ async function reverseGeocode({ lat, lng }) {
     'intersection',
     'neighborhood',
     'sublocality',
+    'sublocality_level_1',
+    'sublocality_level_2',
+    'sublocality_level_3',
+    'administrative_area_level_3',
     'locality',
   ].join('|'));
   url.searchParams.set('key', GOOGLE_MAPS_SERVER_KEY);
@@ -336,10 +400,11 @@ async function reverseGeocode({ lat, lng }) {
   const data = await fetchJson(url.toString());
 
   const results = Array.isArray(data.results) ? data.results : [];
-  const best = results
+  const rankedResults = results
     .slice()
-    .sort((a, b) => scoreReverseGeocodeResult(b) - scoreReverseGeocodeResult(a))[0];
-  const detailed = buildDetailedAddress(best, point);
+    .sort((a, b) => scoreReverseGeocodeResult(b) - scoreReverseGeocodeResult(a));
+  const best = rankedResults[0];
+  const detailed = buildDetailedAddress(best, point, rankedResults);
 
   return {
     name: detailed.name,

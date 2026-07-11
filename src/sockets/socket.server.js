@@ -16,7 +16,11 @@ const {
   assertNoActiveRestriction,
   getActiveRestrictions,
 } = require("../services/penalty.service");
-const { updateDriverLiveLocation } = require("../services/tracking.service");
+const {
+  validateDriverLiveTrackingAccess,
+  createDriverLocationPayload,
+  updateDriverLiveLocation,
+} = require("../services/tracking.service");
 
 let ioInstance = null;
 
@@ -95,7 +99,9 @@ const STATIC_EVENT_ALIASES = Object.freeze({
   "request:closed": ["request.closed"],
   "request:removed": ["request.removed_from_driver"],
   "request:confirmed": ["request.accepted", "trip.created", "trip.accepted"],
+  "request:confirmed-live": ["request.confirmed.live", "trip.accepted.live"],
   "request:status-changed": ["request.status.changed", "trip.status.changed"],
+  "request:status-live": ["request.status.live", "trip.status.live"],
 
   "offer:new": ["offer.created", "offer.received"],
   "offer:accepted": ["offer.accepted"],
@@ -200,6 +206,27 @@ const emitToRoom = (roomName, eventName, payload) => {
 
   for (const name of eventNames) {
     getIO().to(roomName).emit(name, payload);
+  }
+
+  return eventNames;
+};
+
+const emitToRooms = (roomNames, eventName, payload) => {
+  const uniqueRooms = [...new Set((roomNames || []).filter(Boolean))];
+  const eventNames = getEventNamesToEmit(eventName, payload);
+
+  if (uniqueRooms.length === 0) {
+    return eventNames;
+  }
+
+  let broadcaster = getIO();
+
+  for (const roomName of uniqueRooms) {
+    broadcaster = broadcaster.to(roomName);
+  }
+
+  for (const name of eventNames) {
+    broadcaster.emit(name, payload);
   }
 
   return eventNames;
@@ -381,6 +408,12 @@ const initSocketServer = (httpServer) => {
       origin: "*",
       methods: ["GET", "POST", "PATCH", "PUT", "DELETE"],
     },
+    transports: ["websocket", "polling"],
+    allowUpgrades: true,
+    pingInterval: 10000,
+    pingTimeout: 20000,
+    perMessageDeflate: false,
+    httpCompression: false,
   });
 
   ioInstance.use(authenticateSocket);
@@ -388,7 +421,122 @@ const initSocketServer = (httpServer) => {
   ioInstance.on("connection", async (socket) => {
     console.log(`Socket connected: ${socket.accountId}`);
 
-    let lastDriverLocationDbSaveAt = 0;
+    const liveTrackingState = {
+      context: null,
+      validatedAt: 0,
+      validationPromise: null,
+      validationRequestId: "",
+      pendingPersistence: null,
+      persistenceTimer: null,
+      persistenceInFlight: false,
+      lastPersistenceAt: 0,
+    };
+    const trackingContextTtlMs = 8000;
+    const trackingPersistenceIntervalMs = 3000;
+
+    const getValidatedTrackingContext = async (requestId) => {
+      const cleanRequestId = (requestId || "").toString().trim();
+      const now = Date.now();
+      const cached = liveTrackingState.context;
+      const cacheIsFresh =
+        cached &&
+        cached.requestedRequestId === cleanRequestId &&
+        now - liveTrackingState.validatedAt < trackingContextTtlMs;
+
+      if (cacheIsFresh) {
+        return cached;
+      }
+
+      if (
+        liveTrackingState.validationPromise &&
+        liveTrackingState.validationRequestId === cleanRequestId
+      ) {
+        return liveTrackingState.validationPromise;
+      }
+
+      liveTrackingState.validationRequestId = cleanRequestId;
+      liveTrackingState.validationPromise = (async () => {
+        const validated = await validateDriverLiveTrackingAccess({
+          accountId: socket.accountId,
+          requestId: cleanRequestId,
+        });
+
+        const context = {
+          ...validated,
+          requestedRequestId: cleanRequestId,
+        };
+
+        liveTrackingState.context = context;
+        liveTrackingState.validatedAt = Date.now();
+
+        return context;
+      })();
+
+      try {
+        return await liveTrackingState.validationPromise;
+      } finally {
+        liveTrackingState.validationPromise = null;
+        liveTrackingState.validationRequestId = "";
+      }
+    };
+
+    const flushDriverLocationPersistence = async () => {
+      if (liveTrackingState.persistenceInFlight) return;
+
+      const pending = liveTrackingState.pendingPersistence;
+      if (!pending) return;
+
+      liveTrackingState.pendingPersistence = null;
+      liveTrackingState.persistenceInFlight = true;
+
+      try {
+        const result = await updateDriverLiveLocation(pending);
+        liveTrackingState.lastPersistenceAt = Date.now();
+        liveTrackingState.context = {
+          settings: result.settings,
+          driverProfile: result.driverProfile,
+          request: result.request,
+          requestedRequestId: (pending.requestId || "").toString().trim(),
+        };
+        liveTrackingState.validatedAt = Date.now();
+      } catch (error) {
+        liveTrackingState.context = null;
+        liveTrackingState.validatedAt = 0;
+        console.error("Socket driver location persistence error:", error.message);
+      } finally {
+        liveTrackingState.persistenceInFlight = false;
+
+        if (liveTrackingState.pendingPersistence) {
+          const elapsed = Date.now() - liveTrackingState.lastPersistenceAt;
+          const delay = Math.max(trackingPersistenceIntervalMs - elapsed, 0);
+
+          clearTimeout(liveTrackingState.persistenceTimer);
+          liveTrackingState.persistenceTimer = setTimeout(() => {
+            liveTrackingState.persistenceTimer = null;
+            void flushDriverLocationPersistence();
+          }, delay);
+        }
+      }
+    };
+
+    const queueDriverLocationPersistence = (payload) => {
+      liveTrackingState.pendingPersistence = payload;
+
+      if (
+        liveTrackingState.persistenceInFlight ||
+        liveTrackingState.persistenceTimer
+      ) {
+        return;
+      }
+
+      const elapsed = Date.now() - liveTrackingState.lastPersistenceAt;
+      const delay = Math.max(trackingPersistenceIntervalMs - elapsed, 0);
+
+      liveTrackingState.persistenceTimer = setTimeout(() => {
+        liveTrackingState.persistenceTimer = null;
+        void flushDriverLocationPersistence();
+      }, delay);
+    };
 
     socket.join(getAccountRoom(socket.accountId));
 
@@ -445,6 +593,12 @@ const initSocketServer = (httpServer) => {
         }
 
         socket.join(getRequestRoom(requestId));
+
+        if (socket.roles.includes("driver")) {
+          void getValidatedTrackingContext(requestId).catch((error) => {
+            console.error("Socket tracking room warmup error:", error.message);
+          });
+        }
 
         if (callback) {
           callback({
@@ -563,6 +717,7 @@ const initSocketServer = (httpServer) => {
           text: payload.text,
           mediaUrl: payload.mediaUrl,
           location: payload.location,
+          realtime: true,
         });
 
         const receiverId = (
@@ -576,12 +731,15 @@ const initSocketServer = (httpServer) => {
           requestId: room.serviceRequestId,
         };
 
-        ioInstance.to(getChatRoom(room._id)).emit("chat:message-new", chatPayload);
-        emitToRequest(room.serviceRequestId.toString(), "chat:message-new", chatPayload);
-
-        if (receiverId) {
-          emitToAccount(receiverId, "chat:message-new", chatPayload);
-        }
+        emitToRooms(
+          [
+            getChatRoom(room._id),
+            getRequestRoom(room.serviceRequestId.toString()),
+            receiverId ? getAccountRoom(receiverId) : null,
+          ],
+          "chat:message-new",
+          chatPayload,
+        );
 
         emitToAdmins("admin:chat-message-new", chatPayload);
 
@@ -852,10 +1010,45 @@ const initSocketServer = (httpServer) => {
           .toString()
           .trim();
 
-        const {
-          settings,
-          locationPayload,
-        } = await updateDriverLiveLocation({
+        const context = await getValidatedTrackingContext(requestIdFromPayload);
+        const metadata = {
+          source: "socket",
+          socketId: socket.id,
+          platform: payload.platform || null,
+          appVersion: payload.appVersion || null,
+        };
+        const { locationPayload } = createDriverLocationPayload({
+          accountId: socket.accountId,
+          request: context.request,
+          lat: payload.lat,
+          lng: payload.lng,
+          latitude: payload.latitude,
+          longitude: payload.longitude,
+          speed: payload.speed,
+          heading: payload.heading,
+          accuracy: payload.accuracy,
+          timestamp: payload.timestamp ?? payload.updatedAt,
+          metadata,
+        });
+
+        // The live point is broadcast immediately. Database work is intentionally
+        // queued in the background so MongoDB latency never blocks the trip stream.
+        if (locationPayload.serviceRequestId) {
+          emitToRequest(
+            locationPayload.serviceRequestId,
+            "driver:location-updated",
+            locationPayload,
+          );
+        }
+
+        if (context.settings.adminLiveTrackingEnabled) {
+          emitToAdmins("driver:location-updated", {
+            ...locationPayload,
+            activeServiceRequestId: locationPayload.serviceRequestId,
+          });
+        }
+
+        queueDriverLocationPersistence({
           accountId: socket.accountId,
           requestId: requestIdFromPayload,
           lat: payload.lat,
@@ -866,38 +1059,22 @@ const initSocketServer = (httpServer) => {
           heading: payload.heading,
           accuracy: payload.accuracy,
           timestamp: payload.timestamp ?? payload.updatedAt,
-          metadata: {
-            source: 'socket',
-            socketId: socket.id,
-            platform: payload.platform || null,
-            appVersion: payload.appVersion || null,
-          },
+          metadata,
         });
-
-        if (locationPayload.serviceRequestId) {
-          emitToRequest(
-            locationPayload.serviceRequestId,
-            "driver:location-updated",
-            locationPayload,
-          );
-        }
-
-        if (settings.adminLiveTrackingEnabled) {
-          emitToAdmins("driver:location-updated", {
-            ...locationPayload,
-            activeServiceRequestId: locationPayload.serviceRequestId,
-          });
-        }
 
         if (callback) {
           callback({
             success: true,
-            message: "تم تحديث موقع السائق",
-            savedToHistory: locationPayload.savedToHistory,
-            savedToDriverProfile: locationPayload.savedToDriverProfile,
+            message: "تم بث موقع السائق مباشرة",
+            queuedForPersistence: true,
           });
         }
       } catch (error) {
+        liveTrackingState.context = null;
+        liveTrackingState.validatedAt = 0;
+        liveTrackingState.validationPromise = null;
+        liveTrackingState.validationRequestId = "";
+
         if (callback) {
           callback({
             success: false,
@@ -908,6 +1085,11 @@ const initSocketServer = (httpServer) => {
     });
 
     socket.on("disconnect", () => {
+      clearTimeout(liveTrackingState.persistenceTimer);
+      liveTrackingState.persistenceTimer = null;
+      liveTrackingState.pendingPersistence = null;
+      liveTrackingState.validationPromise = null;
+      liveTrackingState.validationRequestId = "";
       console.log(`Socket disconnected: ${socket.accountId}`);
     });
   });
@@ -927,5 +1109,6 @@ module.exports = {
   emitToVehicle,
   emitToAdmins,
   emitToRoom,
+  emitToRooms,
   getEventNamesToEmit,
 };

@@ -104,12 +104,8 @@ const getTrackingSettings = async () => {
 };
 
 const getTrackingPhaseFromStatus = (status) => {
-  if (status === 'in_progress') {
-    return 'in_trip';
-  }
-
-  if (['offer_accepted', 'driver_arriving', 'arrived_to_pickup'].includes(status)) {
-    return 'driver_arriving';
+  if (ACTIVE_TRACKING_STATUSES.includes(status)) {
+    return status;
   }
 
   return 'inactive';
@@ -188,6 +184,88 @@ const resolveDriverActiveRequest = async ({ driverProfile, accountId, requestId 
   return request;
 };
 
+const validateDriverLiveTrackingAccess = async ({ accountId, requestId }) => {
+  const [settings, driverProfile] = await Promise.all([
+    getTrackingSettings(),
+    DriverProfile.findOne({ accountId }),
+  ]);
+
+  if (!driverProfile) {
+    const error = new Error('ملف السائق غير موجود');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const request = await resolveDriverActiveRequest({
+    driverProfile,
+    accountId,
+    requestId,
+  });
+
+  return {
+    settings,
+    driverProfile,
+    request,
+  };
+};
+
+const createDriverLocationPayload = ({
+  accountId,
+  request,
+  lat,
+  lng,
+  latitude,
+  longitude,
+  speed,
+  heading,
+  accuracy,
+  timestamp,
+  metadata,
+  now = new Date(),
+}) => {
+  const coordinates = normalizeCoordinates({ lat, lng, latitude, longitude });
+  const clientTimestamp = normalizeClientTimestamp(timestamp);
+  const normalizedSpeed = toNumberOrNull(speed, { min: 0 });
+  const normalizedHeading = toNumberOrNull(heading, { min: 0, max: 360 });
+  const normalizedAccuracy = toNumberOrNull(accuracy, { min: 0 });
+  const locationMetadata = {
+    ...(metadata && typeof metadata === 'object' ? metadata : {}),
+    ...(clientTimestamp ? { clientTimestamp: clientTimestamp.toISOString() } : {}),
+  };
+  const activeRequestId = request?._id?.toString() || '';
+
+  return {
+    coordinates,
+    clientTimestamp,
+    normalizedSpeed,
+    normalizedHeading,
+    normalizedAccuracy,
+    locationMetadata,
+    locationPayload: {
+      driverAccountId: accountId.toString(),
+      lat: coordinates.lat,
+      lng: coordinates.lng,
+      latitude: coordinates.lat,
+      longitude: coordinates.lng,
+      speed: normalizedSpeed,
+      heading: normalizedHeading,
+      accuracy: normalizedAccuracy,
+      requestId: activeRequestId,
+      serviceRequestId: activeRequestId,
+      rideId: activeRequestId,
+      phase: request ? getTrackingPhaseFromStatus(request.status) : null,
+      requestStatus: request?.status || '',
+      savedToDriverProfile: false,
+      savedToHistory: false,
+      snapshotId: null,
+      source: locationMetadata.source || 'driver_app',
+      timestamp: clientTimestamp || now,
+      clientTimestamp,
+      updatedAt: now,
+    },
+  };
+};
+
 const shouldSaveDriverProfileLocation = ({ driverProfile, now, settings }) => {
   const lastSavedAt = driverProfile.currentLocationUpdatedAt
     ? new Date(driverProfile.currentLocationUpdatedAt).getTime()
@@ -242,32 +320,33 @@ const updateDriverLiveLocation = async ({
   timestamp,
   metadata,
 }) => {
-  const coordinates = normalizeCoordinates({ lat, lng, latitude, longitude });
   const now = new Date();
-  const clientTimestamp = normalizeClientTimestamp(timestamp);
-  const normalizedSpeed = toNumberOrNull(speed, { min: 0 });
-  const normalizedHeading = toNumberOrNull(heading, { min: 0, max: 360 });
-  const normalizedAccuracy = toNumberOrNull(accuracy, { min: 0 });
-  const locationMetadata = {
-    ...(metadata && typeof metadata === 'object' ? metadata : {}),
-    ...(clientTimestamp ? { clientTimestamp: clientTimestamp.toISOString() } : {}),
-  };
-
-  const [settings, driverProfile] = await Promise.all([
-    getTrackingSettings(),
-    DriverProfile.findOne({ accountId }),
-  ]);
-
-  if (!driverProfile) {
-    const error = new Error('ملف السائق غير موجود');
-    error.statusCode = 404;
-    throw error;
-  }
-
-  const request = await resolveDriverActiveRequest({
-    driverProfile,
+  const { settings, driverProfile, request } =
+    await validateDriverLiveTrackingAccess({
+      accountId,
+      requestId,
+    });
+  const {
+    coordinates,
+    clientTimestamp,
+    normalizedSpeed,
+    normalizedHeading,
+    normalizedAccuracy,
+    locationMetadata,
+    locationPayload,
+  } = createDriverLocationPayload({
     accountId,
-    requestId,
+    request,
+    lat,
+    lng,
+    latitude,
+    longitude,
+    speed,
+    heading,
+    accuracy,
+    timestamp,
+    metadata,
+    now,
   });
 
   let savedDriverProfile = false;
@@ -305,8 +384,6 @@ const updateDriverLiveLocation = async ({
     });
   }
 
-  const activeRequestId = request?._id?.toString() || '';
-
   return {
     settings,
     driverProfile,
@@ -314,26 +391,10 @@ const updateDriverLiveLocation = async ({
     savedDriverProfile,
     savedSnapshot,
     locationPayload: {
-      driverAccountId: accountId.toString(),
-      lat: coordinates.lat,
-      lng: coordinates.lng,
-      latitude: coordinates.lat,
-      longitude: coordinates.lng,
-      speed: normalizedSpeed,
-      heading: normalizedHeading,
-      accuracy: normalizedAccuracy,
-      requestId: activeRequestId,
-      serviceRequestId: activeRequestId,
-      rideId: activeRequestId,
-      phase: request ? getTrackingPhaseFromStatus(request.status) : null,
-      requestStatus: request?.status || '',
+      ...locationPayload,
       savedToDriverProfile: savedDriverProfile,
       savedToHistory: !!savedSnapshot,
       snapshotId: savedSnapshot?._id || null,
-      source: locationMetadata.source || 'driver_app',
-      timestamp: clientTimestamp || now,
-      clientTimestamp,
-      updatedAt: now,
     },
   };
 };
@@ -487,6 +548,8 @@ module.exports = {
   DEFAULT_TRACKING_SETTINGS,
   getTrackingSettings,
   normalizeCoordinates,
+  validateDriverLiveTrackingAccess,
+  createDriverLocationPayload,
   updateDriverLiveLocation,
   saveDriverLocationForRequest,
   ensureRequestTrackingAccess,
