@@ -21,7 +21,10 @@ const DEFAULT_SETTINGS = {
   scheduledRide: {
     // الحجز بموعد يظهر للسائقين فورًا، والقيمة دي متروكة للتوافق القديم فقط.
     dispatchBeforeMinutes: 0,
-    minLeadMinutes: 15,
+    minLeadMinutes: 30,
+    driverLockBeforeMinutes: 30,
+    activateBeforeMinutes: 10,
+    reservationAfterMinutes: 120,
     expireAfterScheduledMinutes: 30,
     reminderToleranceMinutes: 5,
   },
@@ -137,6 +140,15 @@ const getScheduledRequestSettings = async () => {
         30,
     ),
     reminderToleranceMinutes: Number(scheduledRide.reminderToleranceMinutes ?? 5),
+    driverLockBeforeMinutes: Number(
+      scheduledRide.driverLockBeforeMinutes ?? reminders.thirtyMinutes ?? 30,
+    ),
+    activateBeforeMinutes: Number(
+      scheduledRide.activateBeforeMinutes ?? reminders.tenMinutes ?? 10,
+    ),
+    reservationAfterMinutes: Number(
+      scheduledRide.reservationAfterMinutes ?? 120,
+    ),
     remindersMinutes: {
       twoHours: Number(reminders.twoHours ?? 120),
       oneHour: Number(reminders.oneHour ?? 60),

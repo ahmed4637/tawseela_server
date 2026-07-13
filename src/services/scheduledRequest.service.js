@@ -12,6 +12,7 @@ const {
 const {
   emitToAdmins,
   emitToAccount,
+  emitToRequest,
   emitToVehicle,
 } = require('../sockets/socket.server');
 
@@ -342,6 +343,410 @@ const expireRequest = async ({ request, reason }) => {
   return true;
 };
 
+
+const recordScheduledActivationError = async ({ request, message }) => {
+  const cleanMessage = String(message || '').trim();
+  const previousMessage = String(request.scheduledActivationLastError || '').trim();
+
+  request.scheduledActivationAttempts = Number(request.scheduledActivationAttempts || 0) + 1;
+  request.scheduledActivationLastError = cleanMessage;
+  await request.save();
+
+  if (cleanMessage && cleanMessage !== previousMessage) {
+    await safeCreateNotification({
+      accountId: request.acceptedDriverAccountId,
+      title: 'تنبيه بخصوص الحجز المجدول',
+      body: cleanMessage,
+      type: 'scheduled_reminder',
+      data: {
+        serviceRequestId: request._id,
+        requestCode: request.requestCode,
+        scheduledAt: request.scheduledAt,
+        reason: 'scheduled_activation_blocked',
+      },
+    });
+  }
+};
+
+const reserveDriverForScheduledRequest = async ({ request, now = new Date() }) => {
+  if (!request?.acceptedDriverAccountId) {
+    return { reserved: false, reason: 'لا يوجد سائق مؤكد للحجز' };
+  }
+
+  if (request.scheduledDriverReservedAt) {
+    return { reserved: true, alreadyReserved: true };
+  }
+
+  const profile = await DriverProfile.findOneAndUpdate(
+    {
+      accountId: request.acceptedDriverAccountId,
+      isActive: true,
+      isApproved: true,
+      reviewStatus: 'approved',
+      isBlockedForDebt: false,
+      $or: [
+        { activeServiceRequestId: null },
+        { activeServiceRequestId: request._id },
+      ],
+      $expr: {
+        $lt: ['$commissionDebt', '$commissionDebtLimit'],
+      },
+    },
+    {
+      activeServiceRequestId: request._id,
+      currentVehicleId: request.acceptedDriverVehicleId,
+      isAvailable: false,
+    },
+    {
+      new: true,
+      runValidators: true,
+    },
+  );
+
+  if (!profile) {
+    return {
+      reserved: false,
+      reason: 'لديك طلب آخر نشط. أنهِه حتى يتم تشغيل الحجز المجدول تلقائيًا',
+    };
+  }
+
+  request.scheduledDriverReservedAt = request.scheduledDriverReservedAt || now;
+  request.scheduledActivationAttempts = Number(request.scheduledActivationAttempts || 0) + 1;
+  request.scheduledActivationLastError = '';
+  await request.save();
+
+  safeSocketEmit(() => {
+    const payload = {
+      request,
+      requestId: request._id,
+      serviceRequestId: request._id,
+      scheduledAt: request.scheduledAt,
+      status: request.status,
+      phase: 'driver_reserved',
+    };
+
+    emitToAccount(request.acceptedDriverAccountId.toString(), 'scheduled:driver-reserved', payload);
+    emitToAccount(request.customerAccountId.toString(), 'scheduled:driver-reserved', payload);
+    emitToRequest(request._id.toString(), 'scheduled:driver-reserved', payload);
+    emitToAdmins('admin:scheduled-driver-reserved', payload);
+  });
+
+  return { reserved: true };
+};
+
+const activateScheduledRequest = async ({ request, now = new Date() }) => {
+  if (request.status !== 'offer_accepted') {
+    return { activated: false, skipped: true };
+  }
+
+  const reservation = await reserveDriverForScheduledRequest({ request, now });
+
+  if (!reservation.reserved) {
+    await recordScheduledActivationError({ request, message: reservation.reason });
+    return { activated: false, blocked: true, reason: reservation.reason };
+  }
+
+  const activatedRequest = await ServiceRequest.findOneAndUpdate(
+    {
+      _id: request._id,
+      serviceType: 'scheduled_ride',
+      status: 'offer_accepted',
+      acceptedDriverAccountId: { $ne: null },
+    },
+    {
+      $set: {
+        status: 'driver_arriving',
+        driverArrivingAt: now,
+        scheduledActivatedAt: now,
+        scheduledActivationLastError: '',
+        'reminderStatus.tenMinutes': true,
+        lastStatusChangedAt: now,
+      },
+      $inc: {
+        scheduledActivationAttempts: 1,
+      },
+    },
+    {
+      new: true,
+      runValidators: true,
+    },
+  );
+
+  if (!activatedRequest) {
+    return { activated: false, skipped: true };
+  }
+
+  const payload = {
+    request: activatedRequest,
+    requestId: activatedRequest._id,
+    serviceRequestId: activatedRequest._id,
+    status: activatedRequest.status,
+    scheduledAt: activatedRequest.scheduledAt,
+    phase: 'runtime_started',
+    emittedAt: now,
+  };
+
+  safeSocketEmit(() => {
+    emitToAccount(
+      activatedRequest.customerAccountId.toString(),
+      'request:status-live',
+      payload,
+    );
+    emitToAccount(
+      activatedRequest.acceptedDriverAccountId.toString(),
+      'request:status-live',
+      payload,
+    );
+    emitToRequest(
+      activatedRequest._id.toString(),
+      'request:status-live',
+      payload,
+    );
+    emitToAdmins('admin:request-status-live', payload);
+
+    // Keep compatibility with screens that still listen to the enriched/status
+    // event while the compact live event remains the primary runtime tunnel.
+    emitToAccount(
+      activatedRequest.customerAccountId.toString(),
+      'request:status-changed',
+      payload,
+    );
+    emitToAccount(
+      activatedRequest.acceptedDriverAccountId.toString(),
+      'request:status-changed',
+      payload,
+    );
+    emitToRequest(
+      activatedRequest._id.toString(),
+      'request:status-changed',
+      payload,
+    );
+    emitToAdmins('admin:request-status-changed', payload);
+  });
+
+  await Promise.all([
+    safeCreateNotification({
+      accountId: activatedRequest.customerAccountId,
+      title: 'بدأ وقت الاستعداد للحجز',
+      body: 'السائق يبدأ الآن التحرك إلى نقطة الانطلاق',
+      type: 'scheduled_reminder',
+      data: {
+        serviceRequestId: activatedRequest._id,
+        requestCode: activatedRequest.requestCode,
+        scheduledAt: activatedRequest.scheduledAt,
+        status: activatedRequest.status,
+      },
+    }),
+    safeCreateNotification({
+      accountId: activatedRequest.acceptedDriverAccountId,
+      title: 'ابدأ التوجه للحجز',
+      body: 'متبقي حوالي 10 دقائق على الحجز. افتح الخريطة وتوجه للعميل',
+      type: 'scheduled_reminder',
+      data: {
+        serviceRequestId: activatedRequest._id,
+        requestCode: activatedRequest.requestCode,
+        scheduledAt: activatedRequest.scheduledAt,
+        status: activatedRequest.status,
+      },
+    }),
+  ]);
+
+  return { activated: true, request: activatedRequest };
+};
+
+
+const expireMissedScheduledRequest = async ({ request, now = new Date() }) => {
+  const expiredRequest = await ServiceRequest.findOneAndUpdate(
+    {
+      _id: request._id,
+      serviceType: 'scheduled_ride',
+      status: 'offer_accepted',
+    },
+    {
+      $set: {
+        status: 'expired',
+        dispatchStatus: 'expired',
+        cancelledAt: now,
+        cancellationReason: 'انتهت مهلة تشغيل الحجز المجدول',
+        lastStatusChangedAt: now,
+        scheduledActivationLastError: 'انتهت مهلة تشغيل الحجز المجدول',
+      },
+    },
+    { new: true, runValidators: true },
+  );
+
+  if (!expiredRequest) return false;
+
+  await DriverProfile.updateOne(
+    {
+      accountId: expiredRequest.acceptedDriverAccountId,
+      activeServiceRequestId: expiredRequest._id,
+    },
+    {
+      $set: {
+        activeServiceRequestId: null,
+        isAvailable: true,
+      },
+    },
+  );
+
+  const payload = {
+    request: expiredRequest,
+    requestId: expiredRequest._id,
+    serviceRequestId: expiredRequest._id,
+    status: expiredRequest.status,
+    reason: 'scheduled_runtime_expired',
+  };
+
+  safeSocketEmit(() => {
+    emitToAccount(expiredRequest.customerAccountId.toString(), 'request:expired', payload);
+    emitToAccount(expiredRequest.acceptedDriverAccountId.toString(), 'request:expired', payload);
+    emitToRequest(expiredRequest._id.toString(), 'request:expired', payload);
+    emitToAdmins('admin:request-expired', payload);
+  });
+
+  await Promise.all([
+    safeCreateNotification({
+      accountId: expiredRequest.customerAccountId,
+      title: 'تعذر تشغيل الحجز المجدول',
+      body: 'انتهت مهلة تشغيل الحجز. يمكنك إنشاء حجز جديد أو التواصل مع الدعم',
+      type: 'scheduled_reminder',
+      data: { serviceRequestId: expiredRequest._id, reason: 'runtime_expired' },
+    }),
+    safeCreateNotification({
+      accountId: expiredRequest.acceptedDriverAccountId,
+      title: 'انتهت مهلة الحجز المجدول',
+      body: 'لم يتم تشغيل الحجز في موعده وتم إغلاقه تلقائيًا',
+      type: 'scheduled_reminder',
+      data: { serviceRequestId: expiredRequest._id, reason: 'runtime_expired' },
+    }),
+  ]);
+
+  return true;
+};
+
+const releasePrematureScheduledReservations = async ({
+  now = new Date(),
+  lockBeforeMinutes = 30,
+} = {}) => {
+  const lockBoundary = new Date(
+    now.getTime() + Math.max(Number(lockBeforeMinutes || 30), 1) * 60 * 1000,
+  );
+
+  // Recover future bookings created by the old flow, which locked the driver
+  // immediately after accepting the offer instead of waiting for the 30-minute
+  // reservation window.
+  const requests = await ServiceRequest.find({
+    serviceType: 'scheduled_ride',
+    status: 'offer_accepted',
+    acceptedDriverAccountId: { $ne: null },
+    scheduledAt: { $gt: lockBoundary },
+  })
+    .select(
+      '_id acceptedDriverAccountId scheduledDriverReservedAt scheduledActivationLastError',
+    )
+    .limit(200);
+
+  let releasedCount = 0;
+
+  for (const request of requests) {
+    const releaseResult = await DriverProfile.updateOne(
+      {
+        accountId: request.acceptedDriverAccountId,
+        activeServiceRequestId: request._id,
+      },
+      {
+        $set: {
+          activeServiceRequestId: null,
+          currentVehicleId: null,
+          isAvailable: true,
+        },
+      },
+    );
+
+    const hasPrematureMetadata =
+      request.scheduledDriverReservedAt != null ||
+      String(request.scheduledActivationLastError || '').trim().length > 0;
+
+    if (hasPrematureMetadata) {
+      request.scheduledDriverReservedAt = null;
+      request.scheduledActivationLastError = '';
+      await request.save();
+    }
+
+    if ((releaseResult.modifiedCount || 0) > 0 || hasPrematureMetadata) {
+      releasedCount += 1;
+    }
+  }
+
+  return releasedCount;
+};
+
+const processScheduledRideRuntime = async () => {
+  const settings = await getScheduledRequestSettings();
+  const now = new Date();
+  const lockBeforeMinutes = Math.max(Number(settings.driverLockBeforeMinutes || 30), 1);
+  const activateBeforeMinutes = Math.max(
+    Math.min(Number(settings.activateBeforeMinutes || 10), lockBeforeMinutes),
+    0,
+  );
+  const upperBound = new Date(now.getTime() + lockBeforeMinutes * 60 * 1000);
+  const releasedPrematureCount = await releasePrematureScheduledReservations({
+    now,
+    lockBeforeMinutes,
+  });
+
+  const requests = await ServiceRequest.find({
+    serviceType: 'scheduled_ride',
+    status: 'offer_accepted',
+    acceptedDriverAccountId: { $ne: null },
+    scheduledAt: { $ne: null, $lte: upperBound },
+  })
+    .sort({ scheduledAt: 1 })
+    .limit(200);
+
+  let reservedCount = 0;
+  let activatedCount = 0;
+  let blockedCount = 0;
+  let missedExpiredCount = 0;
+
+  for (const request of requests) {
+    const minutesUntil = (new Date(request.scheduledAt).getTime() - now.getTime()) / 60000;
+
+    if (minutesUntil < -Math.max(Number(settings.expireAfterScheduledMinutes || 30), 1)) {
+      const expired = await expireMissedScheduledRequest({ request, now });
+      if (expired) missedExpiredCount += 1;
+      continue;
+    }
+
+    if (minutesUntil <= lockBeforeMinutes && !request.scheduledDriverReservedAt) {
+      const reservation = await reserveDriverForScheduledRequest({ request, now });
+
+      if (reservation.reserved) {
+        if (!reservation.alreadyReserved) reservedCount += 1;
+      } else {
+        blockedCount += 1;
+        await recordScheduledActivationError({ request, message: reservation.reason });
+        continue;
+      }
+    }
+
+    if (minutesUntil <= activateBeforeMinutes) {
+      const activation = await activateScheduledRequest({ request, now });
+      if (activation.activated) activatedCount += 1;
+      if (activation.blocked) blockedCount += 1;
+    }
+  }
+
+  return {
+    releasedPrematureCount,
+    reservedCount,
+    activatedCount,
+    blockedCount,
+    missedExpiredCount,
+  };
+};
+
 const expireOpenRequestsAndOffers = async () => {
   const lifecycle = await getRequestLifecycleSettings();
   const now = new Date();
@@ -388,12 +793,16 @@ const expireOpenRequestsAndOffers = async () => {
 };
 
 const runScheduledRequestTick = async () => {
+  // Runtime first: at the 10-minute boundary activation sends the actionable
+  // notification and marks the generic 10-minute reminder as handled.
+  const runtimeResult = await processScheduledRideRuntime();
   await checkScheduledRideReminders();
   const dispatchedCount = await dispatchDueScheduledRequests();
   const cleanupResult = await expireOpenRequestsAndOffers();
 
   return {
     dispatchedCount,
+    ...runtimeResult,
     ...cleanupResult,
   };
 };
@@ -402,6 +811,7 @@ module.exports = {
   dispatchServiceRequestToNearbyDrivers,
   checkScheduledRideReminders,
   dispatchDueScheduledRequests,
+  processScheduledRideRuntime,
   expireOpenRequestsAndOffers,
   runScheduledRequestTick,
 };

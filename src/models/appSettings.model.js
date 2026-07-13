@@ -74,8 +74,26 @@ const appSettingsSchema = new mongoose.Schema(
 
       minLeadMinutes: {
         type: Number,
-        default: 15,
+        default: 30,
         min: 0,
+      },
+
+      driverLockBeforeMinutes: {
+        type: Number,
+        default: 30,
+        min: 1,
+      },
+
+      activateBeforeMinutes: {
+        type: Number,
+        default: 10,
+        min: 0,
+      },
+
+      reservationAfterMinutes: {
+        type: Number,
+        default: 120,
+        min: 30,
       },
 
       expireAfterScheduledMinutes: {

@@ -9,6 +9,13 @@ const serviceRequestSchema = new mongoose.Schema(
       sparse: true,
     },
 
+    clientRequestId: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      default: undefined,
+    },
+
     serviceType: {
       type: String,
       enum: ["instant_ride", "scheduled_ride", "delivery_order"],
@@ -386,6 +393,28 @@ const serviceRequestSchema = new mongoose.Schema(
       default: null,
     },
 
+    scheduledDriverReservedAt: {
+      type: Date,
+      default: null,
+    },
+
+    scheduledActivatedAt: {
+      type: Date,
+      default: null,
+    },
+
+    scheduledActivationAttempts: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    scheduledActivationLastError: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
     dispatchAt: {
       type: Date,
       default: null,
@@ -680,6 +709,13 @@ const serviceRequestSchema = new mongoose.Schema(
 );
 
 serviceRequestSchema.index({ customerAccountId: 1, createdAt: -1 });
+serviceRequestSchema.index(
+  { customerAccountId: 1, clientRequestId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { clientRequestId: { $type: "string" } },
+  },
+);
 serviceRequestSchema.index({ acceptedDriverAccountId: 1, status: 1 });
 serviceRequestSchema.index({ serviceType: 1, status: 1, vehicleTypeCode: 1 });
 serviceRequestSchema.index({ scheduledAt: 1, status: 1 });

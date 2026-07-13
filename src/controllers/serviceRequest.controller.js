@@ -263,17 +263,123 @@ const addMinutes = (date, minutes) => {
 const assertScheduledRideLeadTime = async ({ scheduledAt }) => {
   const settings = await getScheduledRequestSettings();
   const scheduledDate = new Date(scheduledAt);
-  const minAllowedDate = addMinutes(new Date(), settings.minLeadMinutes);
+  const minLeadMinutes = Math.max(
+    Number(settings.minLeadMinutes || 0),
+    Number(settings.driverLockBeforeMinutes || 30),
+  );
+  const minAllowedDate = addMinutes(new Date(), minLeadMinutes);
 
   if (scheduledDate < minAllowedDate) {
     const error = new Error(
-      `وقت الحجز يجب أن يكون بعد ${settings.minLeadMinutes} دقيقة على الأقل`,
+      `وقت الحجز يجب أن يكون بعد ${minLeadMinutes} دقيقة على الأقل`,
     );
     error.statusCode = 400;
     throw error;
   }
 
   return scheduledDate;
+};
+
+
+const ACTIVE_SCHEDULED_RESERVATION_STATUSES = [
+  'pending_offers',
+  'negotiating',
+  'offer_accepted',
+  'driver_arriving',
+  'arrived_to_pickup',
+  'in_progress',
+];
+
+const getScheduledReservationBounds = async ({ scheduledAt, distanceKm = 0 }) => {
+  const settings = await getScheduledRequestSettings();
+  const scheduledDate = new Date(scheduledAt);
+  const beforeMinutes = Math.max(Number(settings.driverLockBeforeMinutes || 30), 0);
+  const distanceBasedMinutes = Math.ceil(Math.max(Number(distanceKm || 0), 0) * 3) + 30;
+  const afterMinutes = Math.max(
+    Number(settings.reservationAfterMinutes || 120),
+    distanceBasedMinutes,
+  );
+
+  return {
+    startAt: addMinutes(scheduledDate, -beforeMinutes),
+    endAt: addMinutes(scheduledDate, afterMinutes),
+  };
+};
+
+const scheduledReservationOverlaps = ({ first, second }) => {
+  return first.startAt < second.endAt && second.startAt < first.endAt;
+};
+
+const assertNoScheduledReservationConflict = async ({
+  accountField,
+  accountId,
+  scheduledAt,
+  distanceKm = 0,
+  excludeRequestId = null,
+}) => {
+  if (!accountId || !scheduledAt) return;
+
+  const targetBounds = await getScheduledReservationBounds({
+    scheduledAt,
+    distanceKm,
+  });
+
+  const query = {
+    serviceType: 'scheduled_ride',
+    status: { $in: ACTIVE_SCHEDULED_RESERVATION_STATUSES },
+    scheduledAt: { $ne: null },
+    [accountField]: accountId,
+  };
+
+  if (excludeRequestId) {
+    query._id = { $ne: excludeRequestId };
+  }
+
+  const existingRequests = await ServiceRequest.find(query)
+    .select('_id requestCode scheduledAt distanceKm status')
+    .lean();
+
+  for (const item of existingRequests) {
+    const itemBounds = await getScheduledReservationBounds({
+      scheduledAt: item.scheduledAt,
+      distanceKm: item.distanceKm,
+    });
+
+    if (scheduledReservationOverlaps({ first: targetBounds, second: itemBounds })) {
+      const error = new Error(
+        accountField === 'acceptedDriverAccountId'
+          ? 'السائق لديه حجز آخر متعارض مع هذا الموعد'
+          : 'لديك حجز آخر متعارض مع هذا الموعد',
+      );
+      error.statusCode = 409;
+      error.conflictingRequest = item;
+      throw error;
+    }
+  }
+};
+
+const assertScheduledRuntimeTiming = async ({ request, nextStatus }) => {
+  if (request.serviceType !== 'scheduled_ride' || !request.scheduledAt) return;
+
+  const settings = await getScheduledRequestSettings();
+  const now = new Date();
+  const scheduledAt = new Date(request.scheduledAt);
+  const activationAt = addMinutes(
+    scheduledAt,
+    -Math.max(Number(settings.activateBeforeMinutes || 10), 0),
+  );
+
+  if (nextStatus === 'driver_arriving' && now < activationAt) {
+    const error = new Error('خريطة الحجز تفتح قبل الموعد بـ10 دقائق');
+    error.statusCode = 409;
+    throw error;
+  }
+
+  if (nextStatus === 'in_progress' && now < scheduledAt) {
+    const error = new Error('لا يمكن بدء الرحلة قبل موعد الحجز');
+    error.statusCode = 409;
+    throw error;
+  }
 };
 
 const isRequestDispatchedToDrivers = (request) => {
@@ -668,7 +774,7 @@ const ensureDriverCanWork = async (accountId, options = {}) => {
     throw error;
   }
 
-  if (!driverProfile.isOnline) {
+  if (!driverProfile.isOnline && options.allowOffline !== true) {
     const error = new Error("يجب أن يكون السائق Online لاستقبال الطلبات");
     error.statusCode = 403;
     throw error;
@@ -689,7 +795,10 @@ const ensureDriverCanWork = async (accountId, options = {}) => {
     throw error;
   }
 
-  if (driverProfile.activeServiceRequestId) {
+  if (
+    driverProfile.activeServiceRequestId &&
+    options.allowExistingActiveRequest !== true
+  ) {
     const activeRequestId = driverProfile.activeServiceRequestId.toString();
     const currentRequestId = options.currentRequestId
       ? options.currentRequestId.toString()
@@ -713,6 +822,43 @@ const ensureDriverCanWork = async (accountId, options = {}) => {
     }
   }
 
+  if (options.allowUpcomingScheduledRequest !== true) {
+    const settings = await getScheduledRequestSettings();
+    const lockWindowEnd = addMinutes(
+      new Date(),
+      Math.max(Number(settings.driverLockBeforeMinutes || 30), 0),
+    );
+    const currentRequestId = options.currentRequestId
+      ? options.currentRequestId.toString()
+      : '';
+
+    const upcomingScheduledRequest = await ServiceRequest.findOne({
+      serviceType: 'scheduled_ride',
+      acceptedDriverAccountId: accountId,
+      status: 'offer_accepted',
+      scheduledAt: { $ne: null, $lte: lockWindowEnd },
+      ...(currentRequestId ? { _id: { $ne: currentRequestId } } : {}),
+    })
+      .select('_id requestCode scheduledAt')
+      .lean();
+
+    if (upcomingScheduledRequest) {
+      if (options.silentActiveRequest) {
+        driverProfile.$locals = driverProfile.$locals || {};
+        driverProfile.$locals.hasActiveRequestConflict = true;
+        driverProfile.$locals.upcomingScheduledRequest = upcomingScheduledRequest;
+        return driverProfile;
+      }
+
+      const error = new Error(
+        'لديك حجز مجدول خلال 30 دقيقة. لا يمكنك استقبال طلب جديد الآن',
+      );
+      error.statusCode = 409;
+      error.upcomingScheduledRequest = upcomingScheduledRequest;
+      throw error;
+    }
+  }
+
   return driverProfile;
 };
 
@@ -729,9 +875,29 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     customerPromoCode,
     scheduledAt,
     deliveryDetails,
+    clientRequestId,
   } = req.body;
 
-  await ensureCustomerHasNoActiveRequest(req.accountId);
+  const cleanClientRequestId = String(
+    clientRequestId || req.headers["x-client-request-id"] || "",
+  )
+    .trim()
+    .slice(0, 120);
+
+  if (cleanClientRequestId) {
+    const existingRequest = await ServiceRequest.findOne({
+      customerAccountId: req.accountId,
+      clientRequestId: cleanClientRequestId,
+    });
+
+    if (existingRequest) {
+      return sendSuccess({
+        res,
+        message: "الطلب محفوظ بالفعل وتم استرجاعه بدون تكرار",
+        doc: existingRequest,
+      });
+    }
+  }
 
   await assertNoActiveRestriction({
     accountId: req.accountId,
@@ -789,6 +955,12 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     }
   }
 
+  await ensureCustomerHasNoActiveRequest(req.accountId, {
+    serviceType,
+    scheduledAt: scheduledDate,
+    distanceKm,
+  });
+
   const estimatedPrice = calculateEstimatedPrice({
     vehicle,
     distanceKm,
@@ -831,48 +1003,70 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     scheduledAt: scheduledDate || scheduledAt,
   });
 
-  const doc = await ServiceRequest.create({
-    requestCode: generateRequestCode(),
-    serviceType,
-    customerAccountId: req.accountId,
+  let doc;
 
-    vehicleTypeId: vehicleTypeId || vehicle._id,
-    vehicleTypeCode: vehicle.code,
-    vehicleTypeName: vehicleTypeName || vehicle.name,
+  try {
+    doc = await ServiceRequest.create({
+      requestCode: generateRequestCode(),
+      ...(cleanClientRequestId ? { clientRequestId: cleanClientRequestId } : {}),
+      serviceType,
+      customerAccountId: req.accountId,
 
-    pickup,
-    pickupLocation: buildGeoPoint({
-      lat: pickup.lat,
-      lng: pickup.lng,
-    }),
+      vehicleTypeId: vehicleTypeId || vehicle._id,
+      vehicleTypeCode: vehicle.code,
+      vehicleTypeName: vehicleTypeName || vehicle.name,
 
-    searchRadiusKm: await getSearchRadiusKmByServiceType(serviceType),
+      pickup,
+      pickupLocation: buildGeoPoint({
+        lat: pickup.lat,
+        lng: pickup.lng,
+      }),
 
-    destination: destination || {},
+      searchRadiusKm: await getSearchRadiusKmByServiceType(serviceType),
 
-    distanceKm: Number(distanceKm) || 0,
-    estimatedPrice,
-    customerOfferedPrice: roundMoney(initialCustomerPrice),
-    customerPromoCodeId: customerPromoResult?.promo?._id || null,
-    customerPromoCode: customerPromoResult?.promo?.code || "",
-    customerPromoSnapshot: customerPromoResult?.snapshot || null,
-    customerDiscountAmount,
-    appCoveredDiscountAmount: customerDiscountAmount,
-    customerPayablePrice,
+      destination: destination || {},
 
-    scheduledAt: serviceType === "scheduled_ride" ? scheduledDate : null,
-    dispatchAt: lifecycleDates.dispatchAt,
-    dispatchedAt: lifecycleDates.dispatchedAt,
-    dispatchStatus: lifecycleDates.dispatchStatus,
-    requestExpiresAt: lifecycleDates.requestExpiresAt,
+      distanceKm: Number(distanceKm) || 0,
+      estimatedPrice,
+      customerOfferedPrice: roundMoney(initialCustomerPrice),
+      customerPromoCodeId: customerPromoResult?.promo?._id || null,
+      customerPromoCode: customerPromoResult?.promo?.code || "",
+      customerPromoSnapshot: customerPromoResult?.snapshot || null,
+      customerDiscountAmount,
+      appCoveredDiscountAmount: customerDiscountAmount,
+      customerPayablePrice,
 
-    deliveryDetails:
-      serviceType === "delivery_order"
-        ? buildDeliveryDetailsPayload(deliveryDetails)
-        : undefined,
+      scheduledAt: serviceType === "scheduled_ride" ? scheduledDate : null,
+      dispatchAt: lifecycleDates.dispatchAt,
+      dispatchedAt: lifecycleDates.dispatchedAt,
+      dispatchStatus: lifecycleDates.dispatchStatus,
+      requestExpiresAt: lifecycleDates.requestExpiresAt,
 
-    status: "pending_offers",
-  });
+      deliveryDetails:
+        serviceType === "delivery_order"
+          ? buildDeliveryDetailsPayload(deliveryDetails)
+          : undefined,
+
+      status: "pending_offers",
+    });
+  } catch (error) {
+    if (error?.code === 11000 && cleanClientRequestId) {
+      const existingRequest = await ServiceRequest.findOne({
+        customerAccountId: req.accountId,
+        clientRequestId: cleanClientRequestId,
+      });
+
+      if (existingRequest) {
+        return sendSuccess({
+          res,
+          message: "الطلب محفوظ بالفعل وتم استرجاعه بدون تكرار",
+          doc: existingRequest,
+        });
+      }
+    }
+
+    throw error;
+  }
 
   if (customerPromoResult?.promo) {
     await reserveCustomerPromoForRequest({
@@ -884,43 +1078,48 @@ const createServiceRequest = asyncHandler(async (req, res) => {
     });
   }
 
-  let nearbyDriversCount = 0;
-
   safeSocketEmit(() => {
     const requestPayload = { request: doc };
     emitToAccount(req.accountId, "request:created", requestPayload);
     emitToAdmins("admin:request-created", {
       request: doc,
-      nearbyDriversCount,
+      nearbyDriversCount: 0,
       dispatchStatus: doc.dispatchStatus,
     });
   });
 
-  if (doc.dispatchStatus === "dispatched") {
-    const dispatchResult = await dispatchServiceRequestToNearbyDrivers({
-      request: doc,
-      reason: serviceType === "scheduled_ride"
-        ? "scheduled_request_created_immediate_dispatch"
-        : "request_created",
-      notifyCustomer: false,
+  // Return the authoritative request as soon as it is stored. Driver discovery,
+  // Socket fan-out and FCM are background work and must not turn a successful
+  // create into a client timeout on a weak connection.
+  setImmediate(async () => {
+    if (doc.dispatchStatus === "dispatched") {
+      try {
+        await dispatchServiceRequestToNearbyDrivers({
+          request: doc,
+          reason: serviceType === "scheduled_ride"
+            ? "scheduled_request_created_immediate_dispatch"
+            : "request_created",
+          notifyCustomer: false,
+        });
+      } catch (error) {
+        console.error("Async request dispatch error:", error.message);
+      }
+    }
+
+    await safeCreateNotification({
+      accountId: req.accountId,
+      title: "تم إنشاء الطلب",
+      body: serviceType === "scheduled_ride"
+        ? "تم إرسال الحجز بموعد للسائقين المؤهلين وفي انتظار قبول أحد السائقين"
+        : "تم إنشاء طلبك بنجاح وفي انتظار عروض السائقين",
+      type: "request",
+      data: {
+        serviceRequestId: doc._id,
+        requestCode: doc.requestCode,
+        serviceType: doc.serviceType,
+        status: doc.status,
+      },
     });
-
-    nearbyDriversCount = dispatchResult.driversCount || 0;
-  }
-
-  await safeCreateNotification({
-    accountId: req.accountId,
-    title: "تم إنشاء الطلب",
-    body: serviceType === "scheduled_ride"
-      ? "تم إرسال الحجز بموعد للسائقين المؤهلين وفي انتظار قبول أحد السائقين"
-      : "تم إنشاء طلبك بنجاح وفي انتظار عروض السائقين",
-    type: "request",
-    data: {
-      serviceRequestId: doc._id,
-      requestCode: doc.requestCode,
-      serviceType: doc.serviceType,
-      status: doc.status,
-    },
   });
 
   return sendSuccess({
@@ -1356,9 +1555,41 @@ const acceptPendingOfferSafely = async ({
     throw error;
   }
 
-  const driverProfile = await ensureDriverCanWork(offer.driverAccountId.toString(), {
-    currentRequestId: request._id,
-  });
+  const isScheduledReservation =
+    request.serviceType === "scheduled_ride" && !!request.scheduledAt;
+  let scheduledNeedsImmediateReservation = false;
+
+  if (isScheduledReservation) {
+    const scheduledSettings = await getScheduledRequestSettings();
+    const reservationStartsAt = addMinutes(
+      new Date(request.scheduledAt),
+      -Math.max(Number(scheduledSettings.driverLockBeforeMinutes || 30), 0),
+    );
+    scheduledNeedsImmediateReservation = new Date() >= reservationStartsAt;
+  }
+
+  const driverProfile = await ensureDriverCanWork(
+    offer.driverAccountId.toString(),
+    isScheduledReservation
+      ? {
+          allowOffline: true,
+          allowExistingActiveRequest: !scheduledNeedsImmediateReservation,
+          currentRequestId: request._id,
+        }
+      : {
+          currentRequestId: request._id,
+        },
+  );
+
+  if (isScheduledReservation) {
+    await assertNoScheduledReservationConflict({
+      accountField: "acceptedDriverAccountId",
+      accountId: offer.driverAccountId,
+      scheduledAt: request.scheduledAt,
+      distanceKm: request.distanceKm,
+      excludeRequestId: request._id,
+    });
+  }
 
   const acceptedDriverVehicle = await DriverVehicle.findOne({
     _id: offer.driverVehicleId,
@@ -1398,45 +1629,47 @@ const acceptPendingOfferSafely = async ({
   }
 
   try {
-    const lockedDriverProfile = await DriverProfile.findOneAndUpdate(
-      {
-        _id: driverProfile._id,
-        isActive: true,
-        isOnline: true,
-        isApproved: true,
-        reviewStatus: "approved",
-        isBlockedForDebt: false,
-        $or: [
-          {
-            activeServiceRequestId: null,
-            isAvailable: true,
+    if (!isScheduledReservation || scheduledNeedsImmediateReservation) {
+      const lockedDriverProfile = await DriverProfile.findOneAndUpdate(
+        {
+          _id: driverProfile._id,
+          isActive: true,
+          ...(isScheduledReservation ? {} : { isOnline: true }),
+          isApproved: true,
+          reviewStatus: "approved",
+          isBlockedForDebt: false,
+          $or: [
+            {
+              activeServiceRequestId: null,
+              isAvailable: true,
+            },
+            {
+              activeServiceRequestId: request._id,
+            },
+          ],
+          $expr: {
+            $lt: ["$commissionDebt", "$commissionDebtLimit"],
           },
-          {
-            activeServiceRequestId: request._id,
-          },
-        ],
-        $expr: {
-          $lt: ["$commissionDebt", "$commissionDebtLimit"],
         },
-      },
-      {
-        activeServiceRequestId: request._id,
-        currentVehicleId: offer.driverVehicleId,
-        isAvailable: false,
-      },
-      {
-        new: true,
-        runValidators: true,
-      },
-    );
+        {
+          activeServiceRequestId: request._id,
+          currentVehicleId: offer.driverVehicleId,
+          isAvailable: false,
+        },
+        {
+          new: true,
+          runValidators: true,
+        },
+      );
 
-    if (!lockedDriverProfile) {
-      const error = new Error("السائق لم يعد متاحًا لهذا الطلب");
-      error.statusCode = 409;
-      throw error;
+      if (!lockedDriverProfile) {
+        const error = new Error("السائق لم يعد متاحًا لهذا الطلب");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      driverLocked = true;
     }
-
-    driverLocked = true;
 
     const vehicle = await Vehicle.findOne({
       code: request.vehicleTypeCode,
@@ -1483,6 +1716,13 @@ const acceptPendingOfferSafely = async ({
           commissionAmount: grossCommissionAmount,
           confirmedAt: acceptedAt,
           lastStatusChangedAt: acceptedAt,
+          scheduledDriverReservedAt:
+            isScheduledReservation && scheduledNeedsImmediateReservation
+              ? acceptedAt
+              : null,
+          scheduledActivatedAt: null,
+          scheduledActivationAttempts: 0,
+          scheduledActivationLastError: "",
           lifecycleLockReason: "",
         },
         $unset: {
@@ -1676,27 +1916,50 @@ const acceptPendingOfferSafely = async ({
   }
 };
 
-const ensureCustomerHasNoActiveRequest = async (accountId) => {
+const ensureCustomerHasNoActiveRequest = async (
+  accountId,
+  { serviceType = '', scheduledAt = null, distanceKm = 0 } = {},
+) => {
+  const settings = await getScheduledRequestSettings();
+  const lockBeforeMinutes = Math.max(Number(settings.driverLockBeforeMinutes || 30), 0);
+  const lockWindowEnd = addMinutes(new Date(), lockBeforeMinutes);
+
   const activeRequest = await ServiceRequest.findOne({
     customerAccountId: accountId,
     status: { $in: activeCustomerRequestStatuses },
     $or: [
-      { serviceType: { $ne: "scheduled_ride" } },
-      { serviceType: "scheduled_ride", dispatchStatus: "dispatched" },
-      { serviceType: "scheduled_ride", status: { $in: confirmedStatuses } },
+      { serviceType: { $ne: 'scheduled_ride' } },
+      {
+        serviceType: 'scheduled_ride',
+        status: { $in: ['driver_arriving', 'arrived_to_pickup', 'in_progress'] },
+      },
+      {
+        serviceType: 'scheduled_ride',
+        status: 'offer_accepted',
+        scheduledAt: { $lte: lockWindowEnd },
+      },
     ],
   })
-    .select("_id requestCode status serviceType dispatchStatus scheduledAt")
+    .select('_id requestCode status serviceType dispatchStatus scheduledAt')
     .lean();
 
-  if (!activeRequest) return;
+  if (activeRequest) {
+    const error = new Error(
+      'لديك طلب نشط بالفعل. لا يمكن إنشاء طلب جديد قبل إنهاء أو إلغاء الطلب الحالي',
+    );
+    error.statusCode = 409;
+    error.activeRequest = activeRequest;
+    throw error;
+  }
 
-  const error = new Error(
-    "لديك طلب نشط بالفعل. لا يمكن إنشاء طلب جديد قبل إنهاء أو إلغاء الطلب الحالي",
-  );
-  error.statusCode = 409;
-  error.activeRequest = activeRequest;
-  throw error;
+  if (serviceType === 'scheduled_ride' && scheduledAt) {
+    await assertNoScheduledReservationConflict({
+      accountField: 'customerAccountId',
+      accountId,
+      scheduledAt,
+      distanceKm,
+    });
+  }
 };
 
 const toPlainObject = (doc) => {
@@ -2691,6 +2954,11 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
 
   assertStatusTransitionAllowed({
     currentStatus: request.status,
+    nextStatus: status,
+  });
+
+  await assertScheduledRuntimeTiming({
+    request,
     nextStatus: status,
   });
 
