@@ -8,6 +8,7 @@ const { emitToAccount } = require('../sockets/socket.server');
 
 let firebaseAppInitialized = false;
 let firebaseAdmin = null;
+let firebaseMessaging = null;
 let firebaseInitError = null;
 
 const normalizeNotificationType = (type = 'general') => {
@@ -39,53 +40,98 @@ const getFirebaseAdmin = () => {
   firebaseAppInitialized = true;
 
   try {
-    // firebase-admin is loaded lazily so the API does not crash before FCM credentials are configured.
-    // Production deployment must install firebase-admin and provide service account credentials.
+    // firebase-admin v14 exposes the modular API from firebase-admin/app and
+    // firebase-admin/messaging. Older releases exposed credential/apps/messaging
+    // on the root package, so we support both shapes to keep deployments safe.
     // eslint-disable-next-line global-require, import/no-extraneous-dependencies
-    firebaseAdmin = require('firebase-admin');
+    const rootAdmin = require('firebase-admin');
 
-    if (firebaseAdmin.apps && firebaseAdmin.apps.length > 0) {
-      return firebaseAdmin;
+    let credentialFactory = null;
+    let initializeFirebaseApp = null;
+    let existingApps = [];
+    let getMessagingClient = null;
+
+    if (
+      rootAdmin?.credential?.cert &&
+      typeof rootAdmin.initializeApp === 'function' &&
+      Array.isArray(rootAdmin.apps)
+    ) {
+      credentialFactory = rootAdmin.credential.cert.bind(rootAdmin.credential);
+      initializeFirebaseApp = rootAdmin.initializeApp.bind(rootAdmin);
+      existingApps = rootAdmin.apps;
+      getMessagingClient = () => rootAdmin.messaging();
+      firebaseAdmin = rootAdmin;
+    } else {
+      // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+      const appAdmin = require('firebase-admin/app');
+      // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+      const messagingAdmin = require('firebase-admin/messaging');
+
+      credentialFactory = appAdmin.cert;
+      initializeFirebaseApp = appAdmin.initializeApp;
+      existingApps = appAdmin.getApps();
+      getMessagingClient = messagingAdmin.getMessaging;
+
+      // Keep the existing exported contract used by this service.
+      firebaseAdmin = {
+        messaging: () => firebaseMessaging || getMessagingClient(),
+      };
     }
 
-    let credential = null;
+    if (existingApps.length === 0) {
+      let credential = null;
 
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
-      const serviceAccountPath = path.resolve(process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
-      if (!fs.existsSync(serviceAccountPath)) {
-        firebaseInitError = `Firebase service account file not found: ${serviceAccountPath}`;
+      if (process.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
+        const serviceAccountPath = path.resolve(process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
+        if (!fs.existsSync(serviceAccountPath)) {
+          firebaseInitError = `Firebase service account file not found: ${serviceAccountPath}`;
+          firebaseAdmin = null;
+          return null;
+        }
+
+        // eslint-disable-next-line import/no-dynamic-require, global-require
+        const serviceAccount = require(serviceAccountPath);
+        credential = credentialFactory(serviceAccount);
+      } else if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+        credential = credentialFactory(serviceAccount);
+      } else if (
+        process.env.FIREBASE_PROJECT_ID &&
+        process.env.FIREBASE_CLIENT_EMAIL &&
+        process.env.FIREBASE_PRIVATE_KEY
+      ) {
+        credential = credentialFactory({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+          privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        });
+      }
+
+      if (!credential) {
+        firebaseInitError = 'FCM credentials are not configured';
         firebaseAdmin = null;
         return null;
       }
 
-      // eslint-disable-next-line import/no-dynamic-require, global-require
-      const serviceAccount = require(serviceAccountPath);
-      credential = firebaseAdmin.credential.cert(serviceAccount);
-    } else if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-      credential = firebaseAdmin.credential.cert(serviceAccount);
-    } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
-      credential = firebaseAdmin.credential.cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      initializeFirebaseApp({
+        credential,
+        projectId: process.env.FIREBASE_PROJECT_ID || undefined,
       });
     }
 
-    if (!credential) {
-      firebaseInitError = 'FCM credentials are not configured';
+    firebaseMessaging = getMessagingClient();
+
+    if (!firebaseMessaging) {
+      firebaseInitError = 'Firebase Messaging could not be initialized';
       firebaseAdmin = null;
       return null;
     }
 
-    firebaseAdmin.initializeApp({
-      credential,
-      projectId: process.env.FIREBASE_PROJECT_ID || undefined,
-    });
     return firebaseAdmin;
   } catch (error) {
     firebaseInitError = error.message;
     firebaseAdmin = null;
+    firebaseMessaging = null;
     return null;
   }
 };
