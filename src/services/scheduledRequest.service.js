@@ -434,33 +434,31 @@ const reserveDriverForScheduledRequest = async ({ request, now = new Date() }) =
   return { reserved: true };
 };
 
-const activateScheduledRequest = async ({ request, now = new Date() }) => {
+const openScheduledMoveWindow = async ({ request, now = new Date() }) => {
   if (request.status !== 'offer_accepted') {
-    return { activated: false, skipped: true };
+    return { moveReady: false, skipped: true };
   }
 
   const reservation = await reserveDriverForScheduledRequest({ request, now });
 
   if (!reservation.reserved) {
     await recordScheduledActivationError({ request, message: reservation.reason });
-    return { activated: false, blocked: true, reason: reservation.reason };
+    return { moveReady: false, blocked: true, reason: reservation.reason };
   }
 
-  const activatedRequest = await ServiceRequest.findOneAndUpdate(
+  const readyRequest = await ServiceRequest.findOneAndUpdate(
     {
       _id: request._id,
       serviceType: 'scheduled_ride',
       status: 'offer_accepted',
       acceptedDriverAccountId: { $ne: null },
+      scheduledActivatedAt: null,
     },
     {
       $set: {
-        status: 'driver_arriving',
-        driverArrivingAt: now,
         scheduledActivatedAt: now,
         scheduledActivationLastError: '',
         'reminderStatus.tenMinutes': true,
-        lastStatusChangedAt: now,
       },
       $inc: {
         scheduledActivationAttempts: 1,
@@ -472,88 +470,76 @@ const activateScheduledRequest = async ({ request, now = new Date() }) => {
     },
   );
 
-  if (!activatedRequest) {
-    return { activated: false, skipped: true };
+  if (!readyRequest) {
+    const latestRequest = await ServiceRequest.findById(request._id);
+    return {
+      moveReady: Boolean(latestRequest?.scheduledActivatedAt),
+      alreadyReady: Boolean(latestRequest?.scheduledActivatedAt),
+      request: latestRequest,
+    };
   }
 
   const payload = {
-    request: activatedRequest,
-    requestId: activatedRequest._id,
-    serviceRequestId: activatedRequest._id,
-    status: activatedRequest.status,
-    scheduledAt: activatedRequest.scheduledAt,
-    phase: 'runtime_started',
+    request: readyRequest,
+    requestId: readyRequest._id,
+    serviceRequestId: readyRequest._id,
+    status: readyRequest.status,
+    scheduledAt: readyRequest.scheduledAt,
+    moveReadyAt: readyRequest.scheduledActivatedAt,
+    phase: 'move_ready',
     emittedAt: now,
   };
 
   safeSocketEmit(() => {
     emitToAccount(
-      activatedRequest.customerAccountId.toString(),
-      'request:status-live',
+      readyRequest.customerAccountId.toString(),
+      'scheduled:move-ready',
       payload,
     );
     emitToAccount(
-      activatedRequest.acceptedDriverAccountId.toString(),
-      'request:status-live',
+      readyRequest.acceptedDriverAccountId.toString(),
+      'scheduled:move-ready',
       payload,
     );
     emitToRequest(
-      activatedRequest._id.toString(),
-      'request:status-live',
+      readyRequest._id.toString(),
+      'scheduled:move-ready',
       payload,
     );
-    emitToAdmins('admin:request-status-live', payload);
-
-    // Keep compatibility with screens that still listen to the enriched/status
-    // event while the compact live event remains the primary runtime tunnel.
-    emitToAccount(
-      activatedRequest.customerAccountId.toString(),
-      'request:status-changed',
-      payload,
-    );
-    emitToAccount(
-      activatedRequest.acceptedDriverAccountId.toString(),
-      'request:status-changed',
-      payload,
-    );
-    emitToRequest(
-      activatedRequest._id.toString(),
-      'request:status-changed',
-      payload,
-    );
-    emitToAdmins('admin:request-status-changed', payload);
+    emitToAdmins('admin:scheduled-move-ready', payload);
   });
 
   await Promise.all([
     safeCreateNotification({
-      accountId: activatedRequest.customerAccountId,
-      title: 'بدأ وقت الاستعداد للحجز',
-      body: 'السائق يبدأ الآن التحرك إلى نقطة الانطلاق',
+      accountId: readyRequest.customerAccountId,
+      title: 'اقترب موعد الحجز',
+      body: 'أصبح السائق قادرًا الآن على بدء التحرك إلى نقطة الانطلاق',
       type: 'scheduled_reminder',
       data: {
-        serviceRequestId: activatedRequest._id,
-        requestCode: activatedRequest.requestCode,
-        scheduledAt: activatedRequest.scheduledAt,
-        status: activatedRequest.status,
+        serviceRequestId: readyRequest._id,
+        requestCode: readyRequest.requestCode,
+        scheduledAt: readyRequest.scheduledAt,
+        status: readyRequest.status,
+        phase: 'move_ready',
       },
     }),
     safeCreateNotification({
-      accountId: activatedRequest.acceptedDriverAccountId,
-      title: 'ابدأ التوجه للحجز',
-      body: 'متبقي حوالي 10 دقائق على الحجز. افتح الخريطة وتوجه للعميل',
+      accountId: readyRequest.acceptedDriverAccountId,
+      title: 'يمكنك بدء التحرك',
+      body: 'متبقي حوالي 10 دقائق على الحجز. افتح تفاصيل الحجز واضغط ابدأ التحرك عندما تكون مستعدًا',
       type: 'scheduled_reminder',
       data: {
-        serviceRequestId: activatedRequest._id,
-        requestCode: activatedRequest.requestCode,
-        scheduledAt: activatedRequest.scheduledAt,
-        status: activatedRequest.status,
+        serviceRequestId: readyRequest._id,
+        requestCode: readyRequest.requestCode,
+        scheduledAt: readyRequest.scheduledAt,
+        status: readyRequest.status,
+        phase: 'move_ready',
       },
     }),
   ]);
 
-  return { activated: true, request: activatedRequest };
+  return { moveReady: true, request: readyRequest };
 };
-
 
 const expireMissedScheduledRequest = async ({ request, now = new Date() }) => {
   const expiredRequest = await ServiceRequest.findOneAndUpdate(
@@ -706,7 +692,7 @@ const processScheduledRideRuntime = async () => {
     .limit(200);
 
   let reservedCount = 0;
-  let activatedCount = 0;
+  let moveReadyCount = 0;
   let blockedCount = 0;
   let missedExpiredCount = 0;
 
@@ -732,16 +718,16 @@ const processScheduledRideRuntime = async () => {
     }
 
     if (minutesUntil <= activateBeforeMinutes) {
-      const activation = await activateScheduledRequest({ request, now });
-      if (activation.activated) activatedCount += 1;
-      if (activation.blocked) blockedCount += 1;
+      const readiness = await openScheduledMoveWindow({ request, now });
+      if (readiness.moveReady && !readiness.alreadyReady) moveReadyCount += 1;
+      if (readiness.blocked) blockedCount += 1;
     }
   }
 
   return {
     releasedPrematureCount,
     reservedCount,
-    activatedCount,
+    moveReadyCount,
     blockedCount,
     missedExpiredCount,
   };
@@ -793,8 +779,9 @@ const expireOpenRequestsAndOffers = async () => {
 };
 
 const runScheduledRequestTick = async () => {
-  // Runtime first: at the 10-minute boundary activation sends the actionable
-  // notification and marks the generic 10-minute reminder as handled.
+  // Runtime first: at the 10-minute boundary the driver receives an explicit
+  // move-ready action. The request remains confirmed until the driver chooses
+  // to start moving.
   const runtimeResult = await processScheduledRideRuntime();
   await checkScheduledRideReminders();
   const dispatchedCount = await dispatchDueScheduledRequests();

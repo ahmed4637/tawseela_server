@@ -29,7 +29,7 @@ const runWorkerTickSafely = async () => {
       result.dispatchedCount > 0 ||
       result.releasedPrematureCount > 0 ||
       result.reservedCount > 0 ||
-      result.activatedCount > 0 ||
+      result.moveReadyCount > 0 ||
       result.blockedCount > 0 ||
       result.missedExpiredCount > 0 ||
       result.expiredRequestsCount > 0 ||

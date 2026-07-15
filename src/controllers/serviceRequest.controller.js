@@ -370,7 +370,7 @@ const assertScheduledRuntimeTiming = async ({ request, nextStatus }) => {
   );
 
   if (nextStatus === 'driver_arriving' && now < activationAt) {
-    const error = new Error('خريطة الحجز تفتح قبل الموعد بـ10 دقائق');
+    const error = new Error('يمكن بدء التحرك للحجز قبل الموعد بـ10 دقائق فقط');
     error.statusCode = 409;
     throw error;
   }
@@ -2986,8 +2986,16 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
   let penaltyResult = null;
 
   if (status === "driver_arriving") {
+    const movingAt = new Date();
     request.status = "driver_arriving";
-    request.driverArrivingAt = request.driverArrivingAt || new Date();
+    request.driverArrivingAt = request.driverArrivingAt || movingAt;
+
+    if (request.serviceType === "scheduled_ride") {
+      request.scheduledActivatedAt = request.scheduledActivatedAt || movingAt;
+      if (request.reminderStatus) {
+        request.reminderStatus.tenMinutes = true;
+      }
+    }
   }
 
   if (status === "arrived_to_pickup") {
