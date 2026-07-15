@@ -24,6 +24,9 @@ const TRACKING_FIELDS = [
   'dbSaveSeconds',
   'minDistanceMetersToSave',
   'staleLocationWarningSeconds',
+  'arrivalRadiusMeters',
+  'maxArrivalAccuracyMeters',
+  'maxArrivalEffectiveRadiusMeters',
   'saveOnlyDuringActiveRequest',
   'adminLiveTrackingEnabled',
 ];

@@ -415,6 +415,45 @@ const serviceRequestSchema = new mongoose.Schema(
       default: "",
     },
 
+    arrivalVerification: {
+      verifiedAt: {
+        type: Date,
+        default: null,
+      },
+      locationAt: {
+        type: Date,
+        default: null,
+      },
+      distanceMeters: {
+        type: Number,
+        default: null,
+        min: 0,
+      },
+      allowedRadiusMeters: {
+        type: Number,
+        default: null,
+        min: 0,
+      },
+      accuracyMeters: {
+        type: Number,
+        default: null,
+        min: 0,
+      },
+      source: {
+        type: String,
+        enum: ["status_request", "driver_profile", "trip_snapshot"],
+        default: null,
+      },
+      lat: {
+        type: Number,
+        default: null,
+      },
+      lng: {
+        type: Number,
+        default: null,
+      },
+    },
+
     dispatchAt: {
       type: Date,
       default: null,

@@ -78,6 +78,12 @@ const driverProfileSchema = new mongoose.Schema(
       default: null,
     },
 
+    currentLocationAccuracy: {
+      type: Number,
+      default: null,
+      min: 0,
+    },
+
     ratingAverage: {
       type: Number,
       default: 0,

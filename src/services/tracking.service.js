@@ -18,6 +18,9 @@ const DEFAULT_TRACKING_SETTINGS = {
   dbSaveSeconds: 5,
   minDistanceMetersToSave: 10,
   staleLocationWarningSeconds: 30,
+  arrivalRadiusMeters: 80,
+  maxArrivalAccuracyMeters: 100,
+  maxArrivalEffectiveRadiusMeters: 120,
   saveOnlyDuringActiveRequest: true,
   adminLiveTrackingEnabled: true,
 };
@@ -96,6 +99,17 @@ const getTrackingSettings = async () => {
       tracking.staleLocationWarningSeconds ??
         DEFAULT_TRACKING_SETTINGS.staleLocationWarningSeconds
     ),
+    arrivalRadiusMeters: Number(
+      tracking.arrivalRadiusMeters ?? DEFAULT_TRACKING_SETTINGS.arrivalRadiusMeters
+    ),
+    maxArrivalAccuracyMeters: Number(
+      tracking.maxArrivalAccuracyMeters ??
+        DEFAULT_TRACKING_SETTINGS.maxArrivalAccuracyMeters
+    ),
+    maxArrivalEffectiveRadiusMeters: Number(
+      tracking.maxArrivalEffectiveRadiusMeters ??
+        DEFAULT_TRACKING_SETTINGS.maxArrivalEffectiveRadiusMeters
+    ),
     saveOnlyDuringActiveRequest:
       tracking.saveOnlyDuringActiveRequest !== false,
     adminLiveTrackingEnabled:
@@ -104,8 +118,12 @@ const getTrackingSettings = async () => {
 };
 
 const getTrackingPhaseFromStatus = (status) => {
-  if (ACTIVE_TRACKING_STATUSES.includes(status)) {
-    return status;
+  if (status === 'in_progress') {
+    return 'in_trip';
+  }
+
+  if (['offer_accepted', 'driver_arriving', 'arrived_to_pickup'].includes(status)) {
+    return 'driver_arriving';
   }
 
   return 'inactive';
@@ -360,6 +378,7 @@ const updateDriverLiveLocation = async ({
       coordinates: [coordinates.lng, coordinates.lat],
     };
     driverProfile.currentLocationUpdatedAt = now;
+    driverProfile.currentLocationAccuracy = normalizedAccuracy;
     await driverProfile.save();
     savedDriverProfile = true;
   }
@@ -469,7 +488,7 @@ const getLatestDriverLocationForRequest = async ({ serviceRequestId, accountId, 
     request.acceptedDriverAccountId
       ? DriverProfile.findOne({ accountId: request.acceptedDriverAccountId })
           .select(
-            'accountId activeServiceRequestId currentLat currentLng currentLocation currentLocationUpdatedAt isOnline isAvailable'
+            'accountId activeServiceRequestId currentLat currentLng currentLocation currentLocationUpdatedAt currentLocationAccuracy isOnline isAvailable'
           )
           .lean()
       : null,
@@ -498,6 +517,7 @@ const getLatestDriverLocationForRequest = async ({ serviceRequestId, accountId, 
         longitude: driverProfile.currentLng,
         requestStatus: request.status,
         phase: getTrackingPhaseFromStatus(request.status),
+        accuracy: driverProfile.currentLocationAccuracy,
         createdAt: driverProfile.currentLocationUpdatedAt || null,
         updatedAt: driverProfile.currentLocationUpdatedAt || null,
         timestamp: driverProfile.currentLocationUpdatedAt || null,

@@ -395,6 +395,26 @@ router.patch(
     body('cancellationReason')
       .optional({ checkFalsy: true })
       .trim(),
+
+    body('driverLat')
+      .optional()
+      .isFloat({ min: -90, max: 90 })
+      .withMessage('خط عرض موقع السائق غير صحيح'),
+
+    body('driverLng')
+      .optional()
+      .isFloat({ min: -180, max: 180 })
+      .withMessage('خط طول موقع السائق غير صحيح'),
+
+    body('driverAccuracy')
+      .optional()
+      .isFloat({ min: 0 })
+      .withMessage('دقة موقع السائق غير صحيحة'),
+
+    body('driverLocationTimestamp')
+      .optional({ checkFalsy: true })
+      .isISO8601()
+      .withMessage('توقيت موقع السائق غير صحيح'),
   ],
   validateRequest,
   updateServiceRequestStatus

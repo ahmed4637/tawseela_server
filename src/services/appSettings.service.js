@@ -24,6 +24,7 @@ const DEFAULT_SETTINGS = {
     minLeadMinutes: 30,
     driverLockBeforeMinutes: 30,
     activateBeforeMinutes: 10,
+    earlyStartGraceMinutes: 5,
     reservationAfterMinutes: 120,
     expireAfterScheduledMinutes: 30,
     reminderToleranceMinutes: 5,
@@ -69,6 +70,9 @@ const DEFAULT_SETTINGS = {
     dbSaveSeconds: 5,
     minDistanceMetersToSave: 10,
     staleLocationWarningSeconds: 30,
+    arrivalRadiusMeters: 80,
+    maxArrivalAccuracyMeters: 100,
+    maxArrivalEffectiveRadiusMeters: 120,
     saveOnlyDuringActiveRequest: true,
     adminLiveTrackingEnabled: true,
   },
@@ -118,6 +122,11 @@ const getTrackingSettings = async () => {
     dbSaveSeconds: Number(tracking.dbSaveSeconds || 5),
     minDistanceMetersToSave: Number(tracking.minDistanceMetersToSave || 10),
     staleLocationWarningSeconds: Number(tracking.staleLocationWarningSeconds || 30),
+    arrivalRadiusMeters: Number(tracking.arrivalRadiusMeters || 80),
+    maxArrivalAccuracyMeters: Number(tracking.maxArrivalAccuracyMeters || 100),
+    maxArrivalEffectiveRadiusMeters: Number(
+      tracking.maxArrivalEffectiveRadiusMeters || 120,
+    ),
     saveOnlyDuringActiveRequest: tracking.saveOnlyDuringActiveRequest !== false,
     adminLiveTrackingEnabled: tracking.adminLiveTrackingEnabled !== false,
   };
@@ -145,6 +154,9 @@ const getScheduledRequestSettings = async () => {
     ),
     activateBeforeMinutes: Number(
       scheduledRide.activateBeforeMinutes ?? reminders.tenMinutes ?? 10,
+    ),
+    earlyStartGraceMinutes: Number(
+      scheduledRide.earlyStartGraceMinutes ?? 5,
     ),
     reservationAfterMinutes: Number(
       scheduledRide.reservationAfterMinutes ?? 120,

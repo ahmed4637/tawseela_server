@@ -16,6 +16,9 @@ const {
 const {
   dispatchServiceRequestToNearbyDrivers,
 } = require("../services/scheduledRequest.service");
+const {
+  assertDriverAtPickup,
+} = require("../services/arrivalGeofence.service");
 
 const asyncHandler = require("../utils/asyncHandler");
 const { sendSuccess } = require("../utils/apiResponse");
@@ -375,10 +378,20 @@ const assertScheduledRuntimeTiming = async ({ request, nextStatus }) => {
     throw error;
   }
 
-  if (nextStatus === 'in_progress' && now < scheduledAt) {
-    const error = new Error('لا يمكن بدء الرحلة قبل موعد الحجز');
-    error.statusCode = 409;
-    throw error;
+  if (nextStatus === 'in_progress') {
+    const earlyStartGraceMinutes = Math.max(
+      Number(settings.earlyStartGraceMinutes || 5),
+      0,
+    );
+    const earlyStartAt = addMinutes(scheduledAt, -earlyStartGraceMinutes);
+
+    if (now < earlyStartAt) {
+      const error = new Error(
+        `لا يمكن بدء الرحلة قبل الموعد بأكثر من ${earlyStartGraceMinutes} دقائق`,
+      );
+      error.statusCode = 409;
+      throw error;
+    }
   }
 };
 
@@ -2983,6 +2996,27 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     throw error;
   }
 
+  let verifiedArrival = null;
+
+  if (status === "arrived_to_pickup") {
+    verifiedArrival = await assertDriverAtPickup({
+      request,
+      accountId: req.accountId,
+      body: req.body,
+    });
+  }
+
+  if (
+    status === "in_progress" &&
+    !request.arrivalVerification?.verifiedAt
+  ) {
+    verifiedArrival = await assertDriverAtPickup({
+      request,
+      accountId: req.accountId,
+      body: req.body,
+    });
+  }
+
   let penaltyResult = null;
 
   if (status === "driver_arriving") {
@@ -3001,11 +3035,16 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
   if (status === "arrived_to_pickup") {
     request.status = "arrived_to_pickup";
     request.arrivedAt = request.arrivedAt || new Date();
+    request.arrivalVerification = verifiedArrival;
   }
 
   if (status === "in_progress") {
     request.status = "in_progress";
     request.startedAt = request.startedAt || new Date();
+
+    if (verifiedArrival) {
+      request.arrivalVerification = verifiedArrival;
+    }
   }
 
   if (status === "completed") {

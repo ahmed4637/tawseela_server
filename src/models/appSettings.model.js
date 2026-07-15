@@ -90,6 +90,13 @@ const appSettingsSchema = new mongoose.Schema(
         min: 0,
       },
 
+      earlyStartGraceMinutes: {
+        type: Number,
+        default: 5,
+        min: 0,
+        max: 30,
+      },
+
       reservationAfterMinutes: {
         type: Number,
         default: 120,
@@ -303,6 +310,27 @@ const appSettingsSchema = new mongoose.Schema(
         type: Number,
         default: 30,
         min: 5,
+      },
+
+      arrivalRadiusMeters: {
+        type: Number,
+        default: 80,
+        min: 20,
+        max: 500,
+      },
+
+      maxArrivalAccuracyMeters: {
+        type: Number,
+        default: 100,
+        min: 10,
+        max: 500,
+      },
+
+      maxArrivalEffectiveRadiusMeters: {
+        type: Number,
+        default: 120,
+        min: 20,
+        max: 750,
       },
 
       saveOnlyDuringActiveRequest: {
