@@ -9,6 +9,7 @@ const Rating = require('../models/rating.model');
 const Complaint = require('../models/complaint.model');
 const CommissionTransaction = require('../models/commissionTransaction.model');
 const DriverPayment = require('../models/driverPayment.model');
+const DriverWallet = require('../models/driverWallet.model');
 const Vehicle = require('../models/vehicle.model');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
@@ -27,6 +28,7 @@ const isValidObjectId = (id) => {
 };
 
 const readRequestBody = (req) => (req.body && typeof req.body === 'object' ? req.body : {});
+const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
 const ensureValidId = (id, message) => {
   if (!isValidObjectId(id)) {
@@ -161,7 +163,7 @@ const getAdminStats = asyncHandler(async (req, res) => {
       },
     }),
     ServiceRequest.countDocuments({ status: 'completed' }),
-    DriverProfile.countDocuments({ commissionDebt: { $gt: 0 } }),
+    DriverWallet.countDocuments({ debtAmount: { $gt: 0 } }),
     Complaint.countDocuments({ status: { $in: ['open', 'under_review'] } }),
     Rating.countDocuments(),
   ]);
@@ -594,16 +596,80 @@ const rejectDriverVehicle = asyncHandler(async (req, res) => {
 });
 
 const getDriversWithDebts = asyncHandler(async (req, res) => {
-  const docs = await DriverProfile.find({
-    commissionDebt: { $gt: 0 },
+  const wallets = await DriverWallet.find({
+    debtAmount: { $gt: 0 },
   })
-    .populate('accountId', 'name phone email roles isActive createdAt')
-    .sort({ commissionDebt: -1 });
+    .populate('driverAccountId', 'name phone email roles isActive createdAt')
+    .populate(
+      'driverProfileId',
+      'reviewStatus isApproved isActive commissionDebt commissionDebtLimit isBlockedForDebt blockedReason'
+    )
+    .sort({ debtAmount: -1 });
+
+  const missingProfileAccountIds = wallets
+    .filter((wallet) => !wallet.driverProfileId && wallet.driverAccountId?._id)
+    .map((wallet) => wallet.driverAccountId._id);
+
+  const missingProfiles = missingProfileAccountIds.length > 0
+    ? await DriverProfile.find({ accountId: { $in: missingProfileAccountIds } })
+    : [];
+
+  const profileByAccountId = new Map(
+    missingProfiles.map((profile) => [profile.accountId.toString(), profile])
+  );
+
+  const docs = wallets.map((walletDoc) => {
+    const wallet = walletDoc.toObject({ virtuals: true });
+    const account = wallet.driverAccountId || null;
+    const fallbackProfile = account?._id
+      ? profileByAccountId.get(account._id.toString()) || null
+      : null;
+    const profile = wallet.driverProfileId || fallbackProfile;
+    const debtAmount = roundMoney(wallet.debtAmount);
+    const debtLimit = roundMoney(wallet.debtLimit || profile?.commissionDebtLimit || 200);
+    const isBlockedForDebt = Boolean(
+      wallet.isBlockedByDebt ||
+      (debtLimit > 0 && debtAmount >= debtLimit)
+    );
+
+    return {
+      _id: profile?._id || wallet._id,
+      accountId: account,
+      reviewStatus: profile?.reviewStatus || '',
+      isApproved: profile?.isApproved === true,
+      isActive: profile?.isActive !== false,
+      commissionDebt: debtAmount,
+      commissionDebtLimit: debtLimit,
+      isBlockedForDebt,
+      blockedReason: isBlockedForDebt
+        ? profile?.blockedReason || 'تم إيقاف استقبال الرحلات بسبب مستحقات التطبيق'
+        : profile?.blockedReason || '',
+      wallet: {
+        _id: wallet._id,
+        debtAmount,
+        debtLimit,
+        isBlockedByDebt: isBlockedForDebt,
+        payableBalance: roundMoney(wallet.payableBalance),
+        netBalance: roundMoney(wallet.payableBalance - debtAmount),
+        totalPaidToApp: roundMoney(wallet.totalPaidToApp),
+        updatedAt: wallet.updatedAt,
+      },
+    };
+  });
 
   return sendSuccess({
     res,
     message: 'تم جلب السائقين أصحاب المديونيات بنجاح',
     docs,
+    extra: {
+      summary: {
+        driversWithDebtCount: docs.length,
+        blockedForDebtCount: docs.filter((item) => item.isBlockedForDebt).length,
+        totalDebtAmount: roundMoney(
+          docs.reduce((total, item) => total + Number(item.commissionDebt || 0), 0)
+        ),
+      },
+    },
   });
 });
 
@@ -699,8 +765,7 @@ const getFinanceSummary = asyncHandler(async (req, res) => {
     unpaidCommissionAgg,
     paidCommissionAgg,
     confirmedPaymentsAgg,
-    driversWithDebtCount,
-    blockedForDebtCount,
+    debtWalletAgg,
     recentPayments,
     recentCommissions,
   ] = await Promise.all([
@@ -719,9 +784,30 @@ const getFinanceSummary = asyncHandler(async (req, res) => {
       { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } },
     ]),
 
-    DriverProfile.countDocuments({ commissionDebt: { $gt: 0 } }),
-
-    DriverProfile.countDocuments({ isBlockedForDebt: true }),
+    DriverWallet.aggregate([
+      { $match: { debtAmount: { $gt: 0 } } },
+      {
+        $group: {
+          _id: null,
+          totalDebtAmount: { $sum: '$debtAmount' },
+          driversWithDebtCount: { $sum: 1 },
+          blockedForDebtCount: {
+            $sum: {
+              $cond: [
+                {
+                  $or: [
+                    { $eq: ['$isBlockedByDebt', true] },
+                    { $gte: ['$debtAmount', '$debtLimit'] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      },
+    ]),
 
    DriverPayment.find({ status: 'confirmed', ...dateQuery })
       .populate('driverAccountId', 'name phone email')
@@ -757,8 +843,9 @@ const getFinanceSummary = asyncHandler(async (req, res) => {
         total: confirmedPaymentsAgg[0]?.total || 0,
         count: confirmedPaymentsAgg[0]?.count || 0,
       },
-      driversWithDebtCount,
-      blockedForDebtCount,
+      driversWithDebtCount: debtWalletAgg[0]?.driversWithDebtCount || 0,
+      blockedForDebtCount: debtWalletAgg[0]?.blockedForDebtCount || 0,
+      totalDebtAmount: roundMoney(debtWalletAgg[0]?.totalDebtAmount || 0),
       recentPayments,
       recentCommissions,
     },
