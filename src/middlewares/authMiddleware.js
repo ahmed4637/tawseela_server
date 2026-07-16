@@ -43,6 +43,15 @@ const protect = async (req, res, next) => {
       throw error;
     }
 
+    const tokenVersion = Number(decoded.tokenVersion || 0);
+    const accountTokenVersion = Number(account.tokenVersion || 0);
+
+    if (tokenVersion !== accountTokenVersion) {
+      const error = new Error('تم تغيير كلمة السر، سجل دخول مرة أخرى');
+      error.statusCode = 401;
+      throw error;
+    }
+
     req.account = account;
     req.user = account;
     req.accountId = account._id.toString();

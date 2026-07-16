@@ -3,6 +3,7 @@ const { body } = require('express-validator');
 const {
   signup,
   login,
+  resetPasswordWithFirebasePhone,
   becomeDriver,
   addDriverVehicle,
   updateDriverVehicle,
@@ -67,6 +68,24 @@ router.post(
   ],
   validateRequest,
   login
+);
+
+router.post(
+  '/password-reset/firebase-phone',
+  [
+    body('firebaseIdToken')
+      .trim()
+      .notEmpty()
+      .withMessage('جلسة التحقق من رقم الموبايل مطلوبة'),
+
+    body('newPassword')
+      .notEmpty()
+      .withMessage('كلمة السر الجديدة مطلوبة')
+      .isLength({ min: 6, max: 128 })
+      .withMessage('كلمة السر يجب أن تكون من 6 إلى 128 حرفًا'),
+  ],
+  validateRequest,
+  resetPasswordWithFirebasePhone
 );
 
 

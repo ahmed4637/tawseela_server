@@ -91,6 +91,17 @@ const accountSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+    tokenVersion: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    passwordChangedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

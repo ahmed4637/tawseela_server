@@ -4,11 +4,14 @@ const path = require('path');
 const Account = require('../models/account.model');
 const DriverProfile = require('../models/driverProfile.model');
 const DriverVehicle = require('../models/driverVehicle.model');
+const DeviceToken = require('../models/deviceToken.model');
+const PasswordResetAudit = require('../models/passwordResetAudit.model');
 
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 const { generateToken } = require('../utils/jwt');
 const { buildPublicUrl } = require('../utils/publicUrl');
+const { getFirebaseAuth } = require('../services/firebaseAuth.service');
 const { getDriverCommissionDebtLimit } = require('../services/appSettings.service');
 const { getOrCreateLoyaltyAccount } = require('../services/loyalty.service');
 const { getEffectiveAdminAccess } = require('../services/adminAccess.service');
@@ -197,6 +200,7 @@ const buildAccountAuthResponse = async (account) => {
     accountId: account._id.toString(),
     role: account.defaultRole,
     roles: account.roles,
+    tokenVersion: Number(account.tokenVersion || 0),
   });
 
   return {
@@ -309,6 +313,140 @@ const login = asyncHandler(async (req, res) => {
     res,
     message: 'تم تسجيل الدخول بنجاح',
     doc: authData,
+  });
+});
+
+const normalizeFirebaseEgyptPhone = (value) => {
+  const raw = value ? value.toString().trim().replace(/[\s-]/g, '') : '';
+
+  if (/^\+20(10|11|12|15)\d{8}$/.test(raw)) {
+    return `0${raw.substring(3)}`;
+  }
+
+  if (/^20(10|11|12|15)\d{8}$/.test(raw)) {
+    return `0${raw.substring(2)}`;
+  }
+
+  if (/^(010|011|012|015)\d{8}$/.test(raw)) {
+    return raw;
+  }
+
+  return '';
+};
+
+const resetPasswordWithFirebasePhone = asyncHandler(async (req, res) => {
+  const { firebaseIdToken, newPassword } = req.body;
+
+  let decodedToken;
+
+  try {
+    decodedToken = await getFirebaseAuth().verifyIdToken(
+      firebaseIdToken.toString().trim(),
+      true
+    );
+  } catch (error) {
+    const verificationError = new Error(
+      'جلسة التحقق غير صالحة أو انتهت، اطلب رمزًا جديدًا'
+    );
+    verificationError.statusCode = 401;
+    throw verificationError;
+  }
+
+  const signInProvider = decodedToken.firebase?.sign_in_provider || '';
+  const verifiedPhone = normalizeFirebaseEgyptPhone(
+    decodedToken.phone_number
+  );
+
+  if (signInProvider !== 'phone' || !verifiedPhone) {
+    const error = new Error('يجب التحقق من رقم الموبايل أولًا');
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const authenticatedAt = Number(
+    decodedToken.auth_time || decodedToken.iat || 0
+  );
+  const tokenIssuedAt = Number(decodedToken.iat || authenticatedAt || 0);
+  const verificationAgeSeconds = Math.floor(Date.now() / 1000) - authenticatedAt;
+
+  if (
+    !authenticatedAt ||
+    verificationAgeSeconds < -60 ||
+    verificationAgeSeconds > 10 * 60
+  ) {
+    const error = new Error('انتهت مهلة رمز التحقق، اطلب رمزًا جديدًا');
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const account = await Account.findOne({ phone: verifiedPhone });
+
+  if (!account) {
+    const error = new Error('لا يوجد حساب توصيلة مرتبط برقم الموبايل ده');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  let auditRecord;
+
+  try {
+    auditRecord = await PasswordResetAudit.create({
+      accountId: account._id,
+      phone: verifiedPhone,
+      firebaseUid: decodedToken.uid,
+      authenticatedAt,
+      tokenIssuedAt,
+      usedAt: new Date(),
+      ipAddress: req.ip || '',
+      userAgent: req.get('user-agent') || '',
+      expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    });
+  } catch (error) {
+    if (error?.code === 11000) {
+      const duplicateError = new Error(
+        'تم استخدام جلسة التحقق دي بالفعل، اطلب رمزًا جديدًا'
+      );
+      duplicateError.statusCode = 409;
+      throw duplicateError;
+    }
+
+    throw error;
+  }
+
+  try {
+    account.password = newPassword.toString();
+    account.passwordChangedAt = new Date();
+    account.tokenVersion = Number(account.tokenVersion || 0) + 1;
+    await account.save();
+  } catch (error) {
+    await PasswordResetAudit.deleteOne({ _id: auditRecord._id });
+    throw error;
+  }
+
+  const cleanupResults = await Promise.allSettled([
+    DeviceToken.updateMany(
+      { accountId: account._id, isActive: true },
+      {
+        isActive: false,
+        disabledReason: 'password_reset',
+      }
+    ),
+    getFirebaseAuth().revokeRefreshTokens(decodedToken.uid),
+  ]);
+
+  cleanupResults.forEach((result) => {
+    if (result.status === 'rejected') {
+      console.error('Password reset cleanup error:', result.reason?.message || result.reason);
+    }
+  });
+
+  return sendSuccess({
+    res,
+    message: 'تم تغيير كلمة السر بنجاح، سجل دخول بالكلمة الجديدة',
+    doc: {
+      success: true,
+      phone: verifiedPhone,
+    },
   });
 });
 
@@ -979,6 +1117,7 @@ const getMe = asyncHandler(async (req, res) => {
 module.exports = {
   signup,
   login,
+  resetPasswordWithFirebasePhone,
   becomeDriver,
   addDriverVehicle,
   updateDriverVehicle,
