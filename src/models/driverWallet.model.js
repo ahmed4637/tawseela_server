@@ -90,6 +90,14 @@ const driverWalletSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+
+    processedSettlementIds: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'SettlementRequest',
+      },
+    ],
   },
   {
     timestamps: true,

@@ -106,6 +106,26 @@ const commissionTransactionSchema = new mongoose.Schema(
       default: null,
     },
 
+
+    settlementAllocations: [
+      {
+        settlementRequestId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'SettlementRequest',
+          required: true,
+        },
+        amount: {
+          type: Number,
+          required: true,
+          min: 0,
+        },
+        appliedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+
     status: {
       type: String,
       enum: ['unpaid', 'partial_paid', 'paid', 'cancelled'],

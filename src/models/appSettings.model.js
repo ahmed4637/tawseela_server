@@ -281,6 +281,39 @@ const appSettingsSchema = new mongoose.Schema(
     },
 
 
+    settlementPayments: {
+      wallets: [
+        {
+          label: { type: String, trim: true, default: '' },
+          provider: { type: String, trim: true, default: '' },
+          accountName: { type: String, trim: true, default: '' },
+          accountNumber: { type: String, trim: true, default: '' },
+          isActive: { type: Boolean, default: true },
+        },
+      ],
+
+      instapay: [
+        {
+          label: { type: String, trim: true, default: '' },
+          accountName: { type: String, trim: true, default: '' },
+          instapayAddress: { type: String, trim: true, default: '' },
+          isActive: { type: Boolean, default: true },
+        },
+      ],
+
+      bankAccounts: [
+        {
+          label: { type: String, trim: true, default: '' },
+          bankName: { type: String, trim: true, default: '' },
+          accountName: { type: String, trim: true, default: '' },
+          accountNumber: { type: String, trim: true, default: '' },
+          iban: { type: String, trim: true, default: '' },
+          isActive: { type: Boolean, default: true },
+        },
+      ],
+    },
+
+
     tracking: {
       liveUpdateSeconds: {
         type: Number,

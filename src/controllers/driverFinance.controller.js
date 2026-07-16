@@ -10,6 +10,8 @@ const DriverDebtSnapshot = require('../models/driverDebtSnapshot.model');
 const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess } = require('../utils/apiResponse');
 const { createAdminAuditLog } = require('../services/adminAuditLog.service');
+const { createNotification } = require('../services/notification.service');
+const { getSettlementPaymentOptions } = require('../services/appSettings.service');
 const {
   ensureDriverWallet,
   recordDriverPaymentToApp,
@@ -125,6 +127,29 @@ const getMyDriverLedger = asyncHandler(async (req, res) => {
   });
 });
 
+const getMySettlementOptions = asyncHandler(async (req, res) => {
+  if (!req.roles?.includes('driver')) {
+    const error = new Error('هذا المسار متاح للسائق فقط');
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const [{ wallet }, options] = await Promise.all([
+    ensureDriverWallet({ driverAccountId: req.accountId }),
+    getSettlementPaymentOptions(),
+  ]);
+
+  return sendSuccess({
+    res,
+    message: 'تم جلب طرق وحسابات تحويل التسوية بنجاح',
+    doc: {
+      ...options,
+      debtAmount: roundMoney(wallet.debtAmount),
+      pendingAllowed: Number(wallet.debtAmount || 0) > 0,
+    },
+  });
+});
+
 const getMySettlements = asyncHandler(async (req, res) => {
   if (!req.roles?.includes('driver')) {
     const error = new Error('هذا المسار متاح للسائق فقط');
@@ -155,8 +180,11 @@ const createMySettlement = asyncHandler(async (req, res) => {
     settlementType: req.body.settlementType,
     amount: req.body.amount,
     method: req.body.method,
+    destinationAccountId: req.body.destinationAccountId,
+    senderReference: req.body.senderReference,
     proofUrl: req.body.proofUrl,
     note: req.body.note,
+    clientRequestId: req.body.clientRequestId,
     requestedByAccountId: req.accountId,
   });
 
@@ -169,7 +197,7 @@ const createMySettlement = asyncHandler(async (req, res) => {
 });
 
 const recordDriverPayment = asyncHandler(async (req, res) => {
-  const { driverAccountId, amount, method = 'cash', notes, reason } = req.body;
+  const { driverAccountId, amount, method = 'wallet', notes, reason } = req.body;
 
   if (!isValidObjectId(driverAccountId)) {
     const error = new Error('رقم حساب السائق غير صحيح');
@@ -328,6 +356,37 @@ const updateSettlementByAdmin = asyncHandler(async (req, res) => {
     reason: reason || adminNote || 'تحديث طلب تسوية السائق',
   });
 
+  const notificationTitle = status === 'completed'
+    ? 'تم اعتماد التسوية'
+    : status === 'rejected'
+      ? 'تم رفض طلب التسوية'
+      : 'تم تحديث طلب التسوية';
+  const notificationBody = status === 'completed'
+    ? `تم اعتماد تحويل بقيمة ${roundMoney(result.settlement.amount)} جنيه وتحديث المديونية`
+    : status === 'rejected'
+      ? `سبب الرفض: ${result.settlement.rejectionReason || adminNote || 'راجع تفاصيل الطلب'}`
+      : 'راجع حالة طلب التسوية من صفحة حساباتك';
+
+  const shouldNotify =
+    status === 'rejected' ||
+    status !== 'completed' ||
+    result.wasAlreadyCompleted !== true;
+
+  if (shouldNotify) {
+    createNotification({
+      accountId: result.settlement.driverAccountId,
+      title: notificationTitle,
+      body: notificationBody,
+      type: 'payment',
+      data: {
+        settlementId: result.settlement._id,
+        settlementStatus: result.settlement.status,
+      },
+    }).catch((error) => {
+      console.error('Settlement notification error:', error.message);
+    });
+  }
+
   return sendSuccess({
     res,
     message: 'تم تحديث طلب التسوية بنجاح',
@@ -401,6 +460,7 @@ module.exports = {
   getMyDriverFinance,
   getMyDriverEarnings,
   getMyDriverLedger,
+  getMySettlementOptions,
   getMySettlements,
   createMySettlement,
   recordDriverPayment,

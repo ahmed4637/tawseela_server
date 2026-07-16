@@ -8,7 +8,10 @@ const DriverPayment = require('../models/driverPayment.model');
 const CommissionTransaction = require('../models/commissionTransaction.model');
 const SettlementRequest = require('../models/settlementRequest.model');
 const ServiceRequest = require('../models/serviceRequest.model');
-const { getAppSettings } = require('./appSettings.service');
+const {
+  getAppSettings,
+  findSettlementPaymentDestination,
+} = require('./appSettings.service');
 
 const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
@@ -183,8 +186,35 @@ const createLedgerTransaction = async ({
   }
 };
 
-const updateOldestCommissionsAfterPayment = async ({ driverAccountId, amount }) => {
-  let remaining = roundMoney(amount);
+const updateOldestCommissionsAfterPayment = async ({
+  driverAccountId,
+  amount,
+  settlementRequestId = null,
+}) => {
+  const paymentAmount = roundMoney(amount);
+  let remaining = paymentAmount;
+  const settlementObjectId = settlementRequestId
+    ? asObjectId(settlementRequestId)
+    : null;
+
+  if (settlementObjectId) {
+    const appliedRows = await CommissionTransaction.find({
+      driverAccountId,
+      'settlementAllocations.settlementRequestId': settlementObjectId,
+    }).select('settlementAllocations');
+
+    const appliedBefore = appliedRows.reduce((sum, commission) => {
+      const applied = (commission.settlementAllocations || [])
+        .filter(
+          (item) =>
+            String(item.settlementRequestId) === String(settlementObjectId),
+        )
+        .reduce((itemSum, item) => itemSum + Number(item.amount || 0), 0);
+      return roundMoney(sum + applied);
+    }, 0);
+
+    remaining = roundMoney(Math.max(paymentAmount - appliedBefore, 0));
+  }
 
   const commissions = await CommissionTransaction.find({
     driverAccountId,
@@ -192,28 +222,68 @@ const updateOldestCommissionsAfterPayment = async ({ driverAccountId, amount }) 
   }).sort({ createdAt: 1 });
 
   for (const commission of commissions) {
-    if (remaining <= 0) {
-      break;
-    }
+    if (remaining <= 0) break;
 
     const paidAmount = roundMoney(commission.paidAmount || 0);
-    const dueAmount = roundMoney(Math.max(Number(commission.amount || 0) - paidAmount, 0));
+    const dueAmount = roundMoney(
+      Math.max(Number(commission.amount || 0) - paidAmount, 0),
+    );
 
     if (dueAmount <= 0) {
       commission.status = 'paid';
+      commission.paidAt = commission.paidAt || new Date();
       await commission.save();
       continue;
     }
 
     const applied = roundMoney(Math.min(remaining, dueAmount));
-    commission.paidAmount = roundMoney(paidAmount + applied);
-    commission.paidAt = commission.paidAmount >= commission.amount ? new Date() : commission.paidAt;
-    commission.status = commission.paidAmount >= commission.amount ? 'paid' : 'partial_paid';
 
-    await commission.save();
+    if (settlementObjectId) {
+      const updated = await CommissionTransaction.findOneAndUpdate(
+        {
+          _id: commission._id,
+          settlementAllocations: {
+            $not: {
+              $elemMatch: { settlementRequestId: settlementObjectId },
+            },
+          },
+        },
+        {
+          $inc: { paidAmount: applied },
+          $push: {
+            settlementAllocations: {
+              settlementRequestId: settlementObjectId,
+              amount: applied,
+              appliedAt: new Date(),
+            },
+          },
+        },
+        { new: true },
+      );
+
+      if (!updated) continue;
+
+      updated.status = updated.paidAmount >= updated.amount ? 'paid' : 'partial_paid';
+      updated.paidAt = updated.status === 'paid' ? updated.paidAt || new Date() : null;
+      await updated.save();
+    } else {
+      commission.paidAmount = roundMoney(paidAmount + applied);
+      commission.paidAt =
+        commission.paidAmount >= commission.amount
+          ? commission.paidAt || new Date()
+          : null;
+      commission.status =
+        commission.paidAmount >= commission.amount ? 'paid' : 'partial_paid';
+      await commission.save();
+    }
 
     remaining = roundMoney(remaining - applied);
   }
+
+  return {
+    requestedAmount: paymentAmount,
+    unappliedAmount: roundMoney(Math.max(remaining, 0)),
+  };
 };
 
 const recordCompletedRequestFinance = async ({ request }) => {
@@ -408,7 +478,7 @@ const recordCompletedRequestFinance = async ({ request }) => {
 const recordDriverPaymentToApp = async ({
   driverAccountId,
   amount,
-  method = 'cash',
+  method = 'wallet',
   notes = '',
   adminAccountId = null,
 }) => {
@@ -469,17 +539,47 @@ const recordDriverPaymentToApp = async ({
   };
 };
 
+const DRIVER_SETTLEMENT_METHODS = ['wallet', 'instapay', 'bank_transfer'];
+
+const normalizeProofUrl = (value) => {
+  let proofUrl = String(value || '').trim();
+  if (proofUrl.startsWith('uploads/')) proofUrl = `/${proofUrl}`;
+  return proofUrl;
+};
+
 const createSettlementRequest = async ({
   driverAccountId,
   settlementType,
   amount,
-  method = 'cash',
+  method = 'wallet',
+  destinationAccountId = '',
+  senderReference = '',
   proofUrl = '',
   note = '',
+  clientRequestId = '',
   requestedByAccountId = null,
 }) => {
+  const cleanClientRequestId = String(clientRequestId || '').trim();
+
+  if (cleanClientRequestId) {
+    const existing = await SettlementRequest.findOne({
+      driverAccountId,
+      clientRequestId: cleanClientRequestId,
+    });
+    if (existing) return existing;
+  }
+
   const { wallet, driverProfile } = await ensureDriverWallet({ driverAccountId });
   const settlementAmount = roundMoney(amount);
+  const cleanMethod = String(method || '').trim();
+  const cleanSenderReference = String(senderReference || '').trim();
+  const cleanProofUrl = normalizeProofUrl(proofUrl);
+
+  if (settlementType !== 'driver_pays_app') {
+    const error = new Error('السائق يمكنه طلب تسوية سداد المديونية فقط');
+    error.statusCode = 400;
+    throw error;
+  }
 
   if (settlementAmount <= 0) {
     const error = new Error('قيمة التسوية غير صحيحة');
@@ -487,40 +587,157 @@ const createSettlementRequest = async ({
     throw error;
   }
 
-  if (settlementType === 'driver_pays_app' && settlementAmount > wallet.debtAmount) {
+  if (settlementAmount > roundMoney(wallet.debtAmount)) {
     const error = new Error('قيمة التسوية أكبر من دين السائق الحالي');
     error.statusCode = 400;
     throw error;
   }
 
-  if (settlementType === 'app_pays_driver' && settlementAmount > wallet.payableBalance) {
-    const error = new Error('قيمة التسوية أكبر من الرصيد المستحق للسائق');
+  if (!DRIVER_SETTLEMENT_METHODS.includes(cleanMethod)) {
+    const error = new Error('طريقة التحويل غير صحيحة');
     error.statusCode = 400;
     throw error;
   }
 
-  if (settlementType === 'offset') {
-    const maxOffset = roundMoney(Math.min(wallet.debtAmount, wallet.payableBalance));
-    if (settlementAmount > maxOffset) {
-      const error = new Error('قيمة المقاصة أكبر من الرصيد المتاح للمقاصة');
-      error.statusCode = 400;
-      throw error;
-    }
+  if (cleanSenderReference.length < 4) {
+    const error = new Error('اكتب الرقم أو الحساب الذي تم التحويل منه');
+    error.statusCode = 400;
+    throw error;
   }
 
-  const settlement = await SettlementRequest.create({
-    driverAccountId,
-    driverProfileId: driverProfile._id,
-    walletId: wallet._id,
-    settlementType,
-    amount: settlementAmount,
-    method: settlementType === 'offset' ? 'offset' : method,
-    proofUrl,
-    note,
-    requestedByAccountId,
+  if (!cleanProofUrl.startsWith('/uploads/general/')) {
+    const error = new Error('صورة إيصال التحويل مطلوبة');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const destination = await findSettlementPaymentDestination({
+    method: cleanMethod,
+    destinationAccountId,
   });
 
-  return settlement;
+  const pendingRows = await SettlementRequest.aggregate([
+    {
+      $match: {
+        driverAccountId: asObjectId(driverAccountId),
+        settlementType: 'driver_pays_app',
+        status: { $in: ['pending', 'approved', 'processing'] },
+      },
+    },
+    { $group: { _id: null, total: { $sum: '$amount' } } },
+  ]);
+
+  const pendingAmount = roundMoney(pendingRows[0]?.total || 0);
+  if (roundMoney(pendingAmount + settlementAmount) > roundMoney(wallet.debtAmount)) {
+    const error = new Error(
+      `لديك طلبات تسوية معلقة بقيمة ${pendingAmount} جنيه، ولا يمكن أن تتجاوز الطلبات دينك الحالي`,
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  try {
+    return await SettlementRequest.create({
+      driverAccountId,
+      driverProfileId: driverProfile._id,
+      walletId: wallet._id,
+      settlementType: 'driver_pays_app',
+      amount: settlementAmount,
+      method: cleanMethod,
+      destinationAccountId: destination.id,
+      destinationSnapshot: destination,
+      senderReference: cleanSenderReference.slice(0, 160),
+      proofUrl: cleanProofUrl,
+      note: String(note || '').trim().slice(0, 500),
+      clientRequestId: cleanClientRequestId,
+      debtBefore: roundMoney(wallet.debtAmount),
+      requestedByAccountId,
+    });
+  } catch (error) {
+    if (error.code === 11000 && cleanClientRequestId) {
+      return SettlementRequest.findOne({
+        driverAccountId,
+        clientRequestId: cleanClientRequestId,
+      });
+    }
+    throw error;
+  }
+};
+
+const applyDriverSettlementToWallet = async ({ settlement, wallet }) => {
+  const settlementId = asObjectId(settlement._id);
+  const amount = roundMoney(settlement.amount);
+  const alreadyApplied = (wallet.processedSettlementIds || []).some(
+    (item) => String(item) === String(settlementId),
+  );
+
+  if (alreadyApplied) {
+    return {
+      wallet,
+      appliedNow: false,
+      previousDebtAmount: roundMoney(
+        settlement.debtBefore || Number(wallet.debtAmount || 0) + amount,
+      ),
+      debtAfter: roundMoney(wallet.debtAmount),
+    };
+  }
+
+  const previousDebtAmount = roundMoney(wallet.debtAmount);
+  if (amount > previousDebtAmount) {
+    const error = new Error('قيمة التسوية أكبر من دين السائق الحالي');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const debtAfter = roundMoney(previousDebtAmount - amount);
+  const totalPaidToApp = roundMoney(Number(wallet.totalPaidToApp || 0) + amount);
+  const isBlockedByDebt = debtAfter >= Number(wallet.debtLimit || 0);
+
+  let updatedWallet = await DriverWallet.findOneAndUpdate(
+    {
+      _id: wallet._id,
+      debtAmount: previousDebtAmount,
+      processedSettlementIds: { $ne: settlementId },
+    },
+    {
+      $set: {
+        debtAmount: debtAfter,
+        totalPaidToApp,
+        isBlockedByDebt,
+      },
+      $addToSet: { processedSettlementIds: settlementId },
+    },
+    { new: true },
+  );
+
+  if (!updatedWallet) {
+    updatedWallet = await DriverWallet.findById(wallet._id);
+    const appliedByAnotherRequest = (updatedWallet?.processedSettlementIds || []).some(
+      (item) => String(item) === String(settlementId),
+    );
+
+    if (!appliedByAnotherRequest) {
+      const error = new Error('تم تحديث مديونية السائق بالتزامن، أعد المحاولة');
+      error.statusCode = 409;
+      throw error;
+    }
+
+    return {
+      wallet: updatedWallet,
+      appliedNow: false,
+      previousDebtAmount: roundMoney(
+        settlement.debtBefore || Number(updatedWallet.debtAmount || 0) + amount,
+      ),
+      debtAfter: roundMoney(updatedWallet.debtAmount),
+    };
+  }
+
+  return {
+    wallet: updatedWallet,
+    appliedNow: true,
+    previousDebtAmount,
+    debtAfter,
+  };
 };
 
 const updateSettlementStatus = async ({
@@ -529,7 +746,7 @@ const updateSettlementStatus = async ({
   adminAccountId,
   adminNote = '',
 }) => {
-  const settlement = await SettlementRequest.findById(settlementId);
+  let settlement = await SettlementRequest.findById(settlementId);
 
   if (!settlement) {
     const error = new Error('طلب التسوية غير موجود');
@@ -537,32 +754,82 @@ const updateSettlementStatus = async ({
     throw error;
   }
 
-  if (['completed', 'rejected', 'cancelled'].includes(settlement.status)) {
+  if (status === 'completed' && settlement.status === 'completed') {
+    const wallet = await DriverWallet.findById(settlement.walletId);
+    const driverProfile = await DriverProfile.findById(settlement.driverProfileId);
+    return {
+      settlement,
+      wallet,
+      driverProfile,
+      ledgerTransaction: settlement.ledgerTransactionId
+        ? await DriverLedgerTransaction.findById(settlement.ledgerTransactionId)
+        : null,
+      payment: settlement.driverPaymentId
+        ? await DriverPayment.findById(settlement.driverPaymentId)
+        : null,
+      wasAlreadyCompleted: true,
+    };
+  }
+
+  if (['rejected', 'cancelled'].includes(settlement.status)) {
     const error = new Error('لا يمكن تعديل طلب تسوية منتهي');
     error.statusCode = 400;
     throw error;
   }
 
-  const { wallet, driverProfile } = await ensureDriverWallet({
-    driverAccountId: settlement.driverAccountId,
-  });
+  if (settlement.status === 'processing' && status !== 'completed') {
+    const error = new Error('طلب التسوية قيد الاعتماد حاليًا');
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const cleanAdminNote = String(adminNote || '').trim();
+
+  if (status === 'rejected' || status === 'cancelled') {
+    if (status === 'rejected' && cleanAdminNote.length < 3) {
+      const error = new Error('سبب رفض التسوية مطلوب');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    settlement.status = status;
+    settlement.reviewedByAdminId = adminAccountId;
+    settlement.reviewedAt = new Date();
+    settlement.adminNote = cleanAdminNote;
+    settlement.rejectionReason = status === 'rejected' ? cleanAdminNote : '';
+    await settlement.save();
+
+    const { wallet, driverProfile } = await ensureDriverWallet({
+      driverAccountId: settlement.driverAccountId,
+    });
+
+    return {
+      settlement,
+      wallet,
+      driverProfile,
+      ledgerTransaction: null,
+      payment: null,
+    };
+  }
 
   if (status === 'approved') {
     settlement.status = 'approved';
     settlement.reviewedByAdminId = adminAccountId;
     settlement.reviewedAt = new Date();
-    settlement.adminNote = adminNote || settlement.adminNote;
+    settlement.adminNote = cleanAdminNote || settlement.adminNote;
     await settlement.save();
-    return { settlement, wallet, driverProfile, ledgerTransaction: null, payment: null };
-  }
 
-  if (status === 'rejected' || status === 'cancelled') {
-    settlement.status = status;
-    settlement.reviewedByAdminId = adminAccountId;
-    settlement.reviewedAt = new Date();
-    settlement.adminNote = adminNote || settlement.adminNote;
-    await settlement.save();
-    return { settlement, wallet, driverProfile, ledgerTransaction: null, payment: null };
+    const { wallet, driverProfile } = await ensureDriverWallet({
+      driverAccountId: settlement.driverAccountId,
+    });
+
+    return {
+      settlement,
+      wallet,
+      driverProfile,
+      ledgerTransaction: null,
+      payment: null,
+    };
   }
 
   if (status !== 'completed') {
@@ -571,22 +838,110 @@ const updateSettlementStatus = async ({
     throw error;
   }
 
-  let ledgerTransaction = null;
-  let payment = null;
-  const settlementAmount = roundMoney(settlement.amount);
+  const { wallet: initialWallet, driverProfile } = await ensureDriverWallet({
+    driverAccountId: settlement.driverAccountId,
+  });
 
   if (settlement.settlementType === 'driver_pays_app') {
-    const result = await recordDriverPaymentToApp({
+    settlement.status = 'processing';
+    settlement.reviewedByAdminId = adminAccountId;
+    settlement.reviewedAt = settlement.reviewedAt || new Date();
+    settlement.adminNote = cleanAdminNote || settlement.adminNote;
+    await settlement.save();
+
+    const walletResult = await applyDriverSettlementToWallet({
+      settlement,
+      wallet: initialWallet,
+    });
+    const wallet = walletResult.wallet;
+
+    await syncDriverProfileDebt({ driverProfile, wallet });
+
+    await updateOldestCommissionsAfterPayment({
       driverAccountId: settlement.driverAccountId,
-      amount: settlementAmount,
-      method: settlement.method,
-      notes: settlement.note || 'تسوية مستحقات السائق',
+      amount: settlement.amount,
+      settlementRequestId: settlement._id,
+    });
+
+    const payment = await DriverPayment.findOneAndUpdate(
+      { settlementRequestId: settlement._id },
+      {
+        $setOnInsert: {
+          driverAccountId: settlement.driverAccountId,
+          walletId: wallet._id,
+          settlementRequestId: settlement._id,
+          amount: roundMoney(settlement.amount),
+          method: settlement.method,
+          status: 'confirmed',
+          previousDebtAmount: walletResult.previousDebtAmount,
+          debtAfter: walletResult.debtAfter,
+          receivedByAdminId: adminAccountId,
+          notes: settlement.note || 'اعتماد طلب تسوية من السائق',
+          senderReference: settlement.senderReference,
+          proofUrl: settlement.proofUrl,
+          destinationSnapshot: settlement.destinationSnapshot,
+        },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true },
+    );
+
+    const ledgerTransaction = await createLedgerTransaction({
+      wallet,
+      driverProfile,
+      type: 'driver_payment_to_app',
+      direction: 'credit',
+      affects: 'debt',
+      amount: settlement.amount,
+      transactionKey: `settlement:${settlement._id}:driver-payment`,
+      description: 'اعتماد تحويل السائق وسداد جزء من مديونية التطبيق',
+      driverPaymentId: payment._id,
+      settlementRequestId: settlement._id,
+      metadata: {
+        method: settlement.method,
+        senderReference: settlement.senderReference,
+        destination: settlement.destinationSnapshot,
+        proofUrl: settlement.proofUrl,
+      },
+      createdBy: 'admin',
       adminAccountId,
     });
 
-    payment = result.payment;
-    ledgerTransaction = result.ledgerTransaction;
+    settlement = await SettlementRequest.findByIdAndUpdate(
+      settlement._id,
+      {
+        $set: {
+          status: 'completed',
+          reviewedByAdminId: adminAccountId,
+          reviewedAt: settlement.reviewedAt || new Date(),
+          completedByAdminId: adminAccountId,
+          completedAt: new Date(),
+          adminNote: cleanAdminNote || settlement.adminNote,
+          rejectionReason: '',
+          debtAfter: walletResult.debtAfter,
+          walletAppliedAt: settlement.walletAppliedAt || new Date(),
+          commissionsAppliedAt: settlement.commissionsAppliedAt || new Date(),
+          driverPaymentId: payment._id,
+          ledgerTransactionId: ledgerTransaction?._id || null,
+        },
+      },
+      { new: true },
+    );
+
+    return {
+      settlement,
+      wallet,
+      driverProfile,
+      ledgerTransaction,
+      payment,
+      wasAlreadyCompleted: !walletResult.appliedNow,
+    };
   }
+
+  // Legacy admin-only settlement types remain supported for old records.
+  const wallet = initialWallet;
+  let ledgerTransaction = null;
+  let payment = null;
+  const settlementAmount = roundMoney(settlement.amount);
 
   if (settlement.settlementType === 'app_pays_driver') {
     if (settlementAmount > wallet.payableBalance) {
@@ -618,7 +973,6 @@ const updateSettlementStatus = async ({
 
   if (settlement.settlementType === 'offset') {
     const maxOffset = roundMoney(Math.min(wallet.debtAmount, wallet.payableBalance));
-
     if (settlementAmount > maxOffset) {
       const error = new Error('قيمة المقاصة أكبر من الرصيد المتاح للمقاصة');
       error.statusCode = 400;
@@ -655,7 +1009,8 @@ const updateSettlementStatus = async ({
   settlement.reviewedAt = settlement.reviewedAt || new Date();
   settlement.completedByAdminId = adminAccountId;
   settlement.completedAt = new Date();
-  settlement.adminNote = adminNote || settlement.adminNote;
+  settlement.adminNote = cleanAdminNote || settlement.adminNote;
+  settlement.ledgerTransactionId = ledgerTransaction?._id || null;
   await settlement.save();
 
   return {

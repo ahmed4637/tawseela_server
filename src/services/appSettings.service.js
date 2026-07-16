@@ -50,6 +50,12 @@ const DEFAULT_SETTINGS = {
     maintenanceMessage: 'التطبيق تحت الصيانة حاليًا',
   },
 
+  settlementPayments: {
+    wallets: [],
+    instapay: [],
+    bankAccounts: [],
+  },
+
   loyalty: {
     isEnabled: true,
     customerEarnPointsPerFarePound: 1,
@@ -226,6 +232,69 @@ const buildRequestLifecycleDates = async ({ serviceType, scheduledAt = null }) =
   };
 };
 
+
+const normalizeSettlementAccount = ({ item, method }) => {
+  const raw = item?.toObject ? item.toObject() : item || {};
+  const id = raw._id?.toString?.() || raw.id?.toString?.() || '';
+
+  return {
+    id,
+    method,
+    label: String(raw.label || '').trim(),
+    provider: String(raw.provider || '').trim(),
+    bankName: String(raw.bankName || '').trim(),
+    accountName: String(raw.accountName || '').trim(),
+    accountNumber: String(raw.accountNumber || '').trim(),
+    iban: String(raw.iban || '').trim(),
+    instapayAddress: String(raw.instapayAddress || '').trim(),
+  };
+};
+
+const getSettlementPaymentOptions = async () => {
+  const settings = await getAppSettings();
+  const payments = settings.settlementPayments || {};
+
+  const wallets = (payments.wallets || [])
+    .filter((item) => item.isActive !== false && String(item.accountNumber || '').trim())
+    .map((item) => normalizeSettlementAccount({ item, method: 'wallet' }));
+
+  const instapay = (payments.instapay || [])
+    .filter((item) => item.isActive !== false && String(item.instapayAddress || '').trim())
+    .map((item) => normalizeSettlementAccount({ item, method: 'instapay' }));
+
+  const bankAccounts = (payments.bankAccounts || [])
+    .filter(
+      (item) =>
+        item.isActive !== false &&
+        (String(item.accountNumber || '').trim() || String(item.iban || '').trim()),
+    )
+    .map((item) => normalizeSettlementAccount({ item, method: 'bank_transfer' }));
+
+  return {
+    methods: [
+      { key: 'wallet', label: 'محفظة إلكترونية', accounts: wallets },
+      { key: 'instapay', label: 'إنستا باي', accounts: instapay },
+      { key: 'bank_transfer', label: 'حساب بنكي', accounts: bankAccounts },
+    ].filter((method) => method.accounts.length > 0),
+  };
+};
+
+const findSettlementPaymentDestination = async ({ method, destinationAccountId }) => {
+  const options = await getSettlementPaymentOptions();
+  const methodEntry = options.methods.find((item) => item.key === method);
+  const destination = methodEntry?.accounts.find(
+    (item) => String(item.id) === String(destinationAccountId || ''),
+  );
+
+  if (!destination) {
+    const error = new Error('حساب التحويل المختار غير متاح حاليًا');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return destination;
+};
+
 module.exports = {
   getAppSettings,
   getDriverCommissionDebtLimit,
@@ -235,4 +304,6 @@ module.exports = {
   getRequestLifecycleSettings,
   getOfferExpiryDate,
   buildRequestLifecycleDates,
+  getSettlementPaymentOptions,
+  findSettlementPaymentDestination,
 };

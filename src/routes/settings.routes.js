@@ -62,6 +62,21 @@ router.put(
       .isInt({ min: 1 })
       .withMessage('تذكير عشر دقائق غير صحيح'),
 
+    body('settlementPayments.wallets')
+      .optional()
+      .isArray({ max: 20 })
+      .withMessage('حسابات المحافظ غير صحيحة'),
+
+    body('settlementPayments.instapay')
+      .optional()
+      .isArray({ max: 20 })
+      .withMessage('حسابات إنستا باي غير صحيحة'),
+
+    body('settlementPayments.bankAccounts')
+      .optional()
+      .isArray({ max: 20 })
+      .withMessage('الحسابات البنكية غير صحيحة'),
+
     body('support.phone')
       .optional({ checkFalsy: true })
       .trim(),

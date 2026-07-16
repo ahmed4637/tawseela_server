@@ -14,6 +14,13 @@ const driverPaymentSchema = new mongoose.Schema(
       default: null,
     },
 
+
+    settlementRequestId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'SettlementRequest',
+      default: null,
+    },
+
     amount: {
       type: Number,
       required: [true, 'قيمة السداد مطلوبة'],
@@ -23,7 +30,7 @@ const driverPaymentSchema = new mongoose.Schema(
     method: {
       type: String,
       enum: ['cash', 'wallet', 'bank_transfer', 'vodafone_cash', 'instapay', 'manual'],
-      default: 'cash',
+      default: 'wallet',
     },
 
     status: {
@@ -55,6 +62,24 @@ const driverPaymentSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+
+
+    senderReference: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+
+    proofUrl: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+
+    destinationSnapshot: {
+      type: Object,
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -67,6 +92,16 @@ driverPaymentSchema.index({
 });
 
 driverPaymentSchema.index({ walletId: 1, createdAt: -1 });
+
+driverPaymentSchema.index(
+  { settlementRequestId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      settlementRequestId: { $type: 'objectId' },
+    },
+  },
+);
 
 const DriverPayment = mongoose.model('DriverPayment', driverPaymentSchema);
 

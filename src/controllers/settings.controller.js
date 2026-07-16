@@ -4,6 +4,44 @@ const { sendSuccess } = require('../utils/apiResponse');
 const { getAppSettings } = require('../services/appSettings.service');
 const { createAdminAuditLog } = require('../services/adminAuditLog.service');
 
+
+const cleanText = (value, maxLength = 160) =>
+  String(value || '').trim().slice(0, maxLength);
+
+const normalizeSettlementPayments = (value = {}) => {
+  const normalizeList = (items, mapper) =>
+    (Array.isArray(items) ? items : []).slice(0, 20).map(mapper);
+
+  return {
+    wallets: normalizeList(value.wallets, (item = {}) => ({
+      ...(item._id ? { _id: item._id } : {}),
+      label: cleanText(item.label, 80),
+      provider: cleanText(item.provider, 80),
+      accountName: cleanText(item.accountName, 120),
+      accountNumber: cleanText(item.accountNumber, 80),
+      isActive: item.isActive !== false,
+    })).filter((item) => item.accountNumber),
+
+    instapay: normalizeList(value.instapay, (item = {}) => ({
+      ...(item._id ? { _id: item._id } : {}),
+      label: cleanText(item.label, 80),
+      accountName: cleanText(item.accountName, 120),
+      instapayAddress: cleanText(item.instapayAddress, 120),
+      isActive: item.isActive !== false,
+    })).filter((item) => item.instapayAddress),
+
+    bankAccounts: normalizeList(value.bankAccounts, (item = {}) => ({
+      ...(item._id ? { _id: item._id } : {}),
+      label: cleanText(item.label, 80),
+      bankName: cleanText(item.bankName, 120),
+      accountName: cleanText(item.accountName, 120),
+      accountNumber: cleanText(item.accountNumber, 100),
+      iban: cleanText(item.iban, 100),
+      isActive: item.isActive !== false,
+    })).filter((item) => item.accountNumber || item.iban),
+  };
+};
+
 const getPublicSettings = asyncHandler(async (req, res) => {
   const settings = await getAppSettings();
 
@@ -37,6 +75,7 @@ const updateAdminSettings = asyncHandler(async (req, res) => {
     support,
     appStatus,
     loyalty,
+    settlementPayments,
     reason,
   } = req.body;
 
@@ -84,6 +123,11 @@ const updateAdminSettings = asyncHandler(async (req, res) => {
         ...(loyalty.tierRules || {}),
       },
     };
+  }
+
+
+  if (settlementPayments) {
+    settings.settlementPayments = normalizeSettlementPayments(settlementPayments);
   }
 
   settings.updatedByAdminId = req.accountId;
