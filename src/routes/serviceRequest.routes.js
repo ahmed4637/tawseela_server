@@ -394,7 +394,9 @@ router.patch(
 
     body('cancellationReason')
       .optional({ checkFalsy: true })
-      .trim(),
+      .trim()
+      .isLength({ max: 500 })
+      .withMessage('سبب الإلغاء يجب ألا يزيد عن 500 حرف'),
 
     body('driverLat')
       .optional()

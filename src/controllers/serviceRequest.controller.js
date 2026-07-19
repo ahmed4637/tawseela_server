@@ -75,6 +75,32 @@ const roundMoney = (value) => {
   return Math.round((Number(value) || 0) * 100) / 100;
 };
 
+const clearCancelledRequestFinancials = (request) => {
+  request.customerPayablePrice = 0;
+  request.grossCommissionAmount = 0;
+  request.driverPromoDiscountAmount = 0;
+  request.commissionAmount = 0;
+  request.driverNetAmount = 0;
+  request.appDriverPayableAmount = 0;
+  request.driverWalletId = null;
+  request.commissionTransactionId = null;
+  request.financeSummary = {
+    customerPaidToDriver: 0,
+    appCoveredDiscountAddedToDriverBalance: 0,
+    grossCommissionAmount: 0,
+    driverPromoDiscountAmount: 0,
+    netCommissionDebtAdded: 0,
+    driverNetAfterCommission: 0,
+    recordedAt: null,
+  };
+
+  if (request.serviceType === "delivery_order" && request.deliveryDetails) {
+    request.deliveryDetails.itemCostReimbursementAmount = 0;
+    request.deliveryDetails.customerTotalPayableToDriver = 0;
+    request.deliveryDetails.commissionableDeliveryFare = 0;
+  }
+};
+
 const normalizeDeliveryPaymentResponsibility = (deliveryDetails = {}) => {
   if (deliveryDetails.itemPaymentResponsibility) {
     return deliveryDetails.itemPaymentResponsibility;
@@ -2943,6 +2969,23 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
   } = req.body;
 
   const statusBeforeUpdate = request.status;
+  const normalizedCancellationReason = cancellationReason?.toString().trim() || "";
+  const isCancellationStatus = [
+    "cancelled_by_customer",
+    "cancelled_by_driver",
+  ].includes(status);
+
+  if (isCancellationStatus && !normalizedCancellationReason) {
+    const error = new Error("سبب الإلغاء مطلوب");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (normalizedCancellationReason.length > 500) {
+    const error = new Error("سبب الإلغاء يجب ألا يزيد عن 500 حرف");
+    error.statusCode = 400;
+    throw error;
+  }
 
   const isCustomer = request.customerAccountId.toString() === req.accountId;
   const isAcceptedDriver =
@@ -3238,14 +3281,15 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
 
   if (status === "cancelled_by_customer") {
     request.status = "cancelled_by_customer";
-    request.cancellationReason = cancellationReason || "";
+    request.cancellationReason = normalizedCancellationReason;
     request.cancelledAt = new Date();
+    clearCancelledRequestFinancials(request);
 
     penaltyResult = await applyCancellationPenalty({
       request,
       actorType: "customer",
       accountId: request.customerAccountId,
-      reason: cancellationReason || "إلغاء الطلب من العميل",
+      reason: normalizedCancellationReason,
       statusBeforeCancellation: statusBeforeUpdate,
       createdBy: req.roles?.includes("admin") ? "admin" : "system",
       adminId: req.roles?.includes("admin") ? req.accountId : null,
@@ -3254,14 +3298,15 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
 
   if (status === "cancelled_by_driver") {
     request.status = "cancelled_by_driver";
-    request.cancellationReason = cancellationReason || "";
+    request.cancellationReason = normalizedCancellationReason;
     request.cancelledAt = new Date();
+    clearCancelledRequestFinancials(request);
 
     penaltyResult = await applyCancellationPenalty({
       request,
       actorType: "driver",
       accountId: request.acceptedDriverAccountId || req.accountId,
-      reason: cancellationReason || "إلغاء الطلب من السائق",
+      reason: normalizedCancellationReason,
       statusBeforeCancellation: statusBeforeUpdate,
       createdBy: req.roles?.includes("admin") ? "admin" : "system",
       adminId: req.roles?.includes("admin") ? req.accountId : null,
@@ -3280,6 +3325,7 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     request.status = "driver_no_show";
     request.cancellationReason = cancellationReason || "السائق لم يحضر";
     request.cancelledAt = new Date();
+    clearCancelledRequestFinancials(request);
 
     if (request.acceptedDriverAccountId) {
       penaltyResult = await applyCancellationPenalty({
@@ -3306,6 +3352,7 @@ const updateServiceRequestStatus = asyncHandler(async (req, res) => {
     request.status = "customer_no_show";
     request.cancellationReason = cancellationReason || "العميل لم يحضر";
     request.cancelledAt = new Date();
+    clearCancelledRequestFinancials(request);
 
     penaltyResult = await applyCancellationPenalty({
       request,
